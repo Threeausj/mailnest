@@ -17,7 +17,8 @@ RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build --chown=node:node /app/server/dist ./server/dist
 COPY --from=build --chown=node:node /app/web/dist ./web/dist
 COPY --from=build --chown=node:node /app/docs ./docs
-RUN mkdir -p /app/data && chown node:node /app/data
+# NAS ACLs can expose source files with mode 000; normalize image permissions.
+RUN chmod -R a=rX /app && mkdir -p /app/data && chown node:node /app/data && chmod 700 /app/data
 USER node
 EXPOSE 3001
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 CMD node -e "fetch('http://127.0.0.1:3001/api/v1/health').then(r => {if(!r.ok) process.exit(1)}).catch(() => process.exit(1))"
