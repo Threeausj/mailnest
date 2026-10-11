@@ -94,7 +94,7 @@ export class MailService {
   private stopped = false;
   private syncRunning=0;
   private syncWaiters:(()=>void)[]=[];
-  constructor(private store:Store,private config:Config,private emit:Emit,private notify:(userId:string,accountId:string,count:number)=>Promise<void>) { this.box=new SecretBox(config.encryptionKey); }
+  constructor(private store:Store,private config:Config,private emit:Emit,private notify:(userId:string,accountId:string,count:number,notificationId?:string)=>Promise<void>) { this.box=new SecretBox(config.encryptionKey); }
   private currentAccount(account:AccountRow):AccountRow {
     const current=this.store.account(account.id,account.user_id);
     if(!current)throw new ApiError(404,'NOT_FOUND','邮箱不存在。');
@@ -250,6 +250,7 @@ export class MailService {
       const account=this.store.account(id);if(!account)return;
       this.store.db.prepare("UPDATE accounts SET status='syncing',error=NULL WHERE id=?").run(id);this.emit(account.user_id,'sync',{accountId:id,status:'syncing'});
       let newMail=0,completed=0;
+      const notificationId=randomUUID();
       const failures:string[]=[];
       try {
         const credentials=await this.credentials(account);
@@ -274,6 +275,12 @@ export class MailService {
                 throw new ApiError(409,'MISSING_UID_VALIDITY','该目录未返回有效的邮件编号信息，已保留原有缓存。');
               }
               const validity=mailbox.uidValidity.toString();
+              // Establish an INBOX baseline only after its own successful fetch.
+              // Other folders can sync first, and a UIDVALIDITY reset renumbers
+              // existing mail; neither should turn old inbox contents into alerts.
+              const previous=this.store.db.prepare('SELECT f.uid_validity,COALESCE((SELECT MAX(m.uid) FROM messages m WHERE m.account_id=f.account_id AND m.folder=f.path AND m.uid_validity=?),0) AS max_uid FROM folders f WHERE f.account_id=? AND f.path=?').get(validity,id,path) as {uid_validity:string|null;max_uid:number}|undefined;
+              const notifyNewMail=path.toUpperCase()==='INBOX'&&previous?.uid_validity===validity;
+              const previousMaxUid=previous?.max_uid||0;
               const fetched=mailbox.exists?await client.fetchAll(`${Math.max(1,mailbox.exists-this.config.syncMessageLimit+1)}:*`,{uid:true,envelope:true,flags:true,internalDate:true,bodyStructure:true,size:true}):[];
               if(fetched.length<Math.min(mailbox.exists,this.config.syncMessageLimit))throw new ApiError(409,'INCOMPLETE_FETCH','目录返回的邮件列表不完整，已保留原有缓存，下次同步将重试。');
               const seen=new Set<string>();
@@ -289,7 +296,11 @@ export class MailService {
                 const summary={from:addresses(envelope?.from)[0]||{name:'',address:''},to:addresses(envelope?.to),cc:addresses(envelope?.cc),subject:envelope?.subject||'(无主题)',preview:old?JSON.parse(old.summary).preview||'':'',date,hasAttachments:hasAttachments(message.bodyStructure),size:message.size};
                 const unread=!message.flags?.has('\\Seen'),starred=!!message.flags?.has('\\Flagged');
                 this.store.db.prepare('INSERT INTO messages(id,account_id,folder,uid,uid_validity,summary,unread,starred,date) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET summary=excluded.summary,unread=excluded.unread,starred=excluded.starred,date=excluded.date WHERE messages.summary<>excluded.summary OR messages.unread<>excluded.unread OR messages.starred<>excluded.starred OR messages.date<>excluded.date').run(messageId,id,path,message.uid,validity,JSON.stringify(summary),Number(unread),Number(starred),date);
-                if(!old&&unread&&path.toUpperCase()==='INBOX'&&account.last_synced_at)folderNewMail++;
+                // A phone or another mail client may mark the new message read
+                // before this poll; its arrival should still trigger the alert.
+                // Lower UIDs can re-enter the bounded cache after newer mail is
+                // deleted; only UIDs above the pre-fetch maximum are arrivals.
+                if(!old&&notifyNewMail&&message.uid>previousMaxUid)folderNewMail++;
               }
               const cached=this.store.db.prepare('SELECT id FROM messages WHERE account_id=? AND folder=?').all(id,path) as {id:string}[];
               for(const item of cached)if(!seen.has(item.id))this.store.db.prepare('DELETE FROM messages WHERE id=?').run(item.id);
@@ -310,12 +321,12 @@ export class MailService {
         const status=failures.length?(completed?'partial':'error'):'connected';
         const error=failures.length?`部分目录同步未完成（${failures.length} 个）：${failures.slice(0,3).join('；')}`:null;
         this.store.db.prepare('UPDATE accounts SET status=?,error=?,last_synced_at=? WHERE id=?').run(status,error,completed?new Date().toISOString():account.last_synced_at,id);this.emit(account.user_id,'sync',{accountId:id,status});
-        if(newMail>0){this.emit(account.user_id,'mail',{accountId:id,count:newMail});await this.notify(account.user_id,id,newMail);}
+        if(newMail>0){this.emit(account.user_id,'mail',{accountId:id,count:newMail,notificationId});await this.notify(account.user_id,id,newMail,notificationId);}
       }catch(error){
         if(this.stopped)return;
         const status=completed?'partial':'error';
         this.store.db.prepare('UPDATE accounts SET status=?,error=?,last_synced_at=? WHERE id=?').run(status,safeMailError(error),completed?new Date().toISOString():account.last_synced_at,id);this.emit(account.user_id,'sync',{accountId:id,status});
-        if(newMail>0){this.emit(account.user_id,'mail',{accountId:id,count:newMail});await this.notify(account.user_id,id,newMail);}
+        if(newMail>0){this.emit(account.user_id,'mail',{accountId:id,count:newMail,notificationId});await this.notify(account.user_id,id,newMail,notificationId);}
       }
     });
   }

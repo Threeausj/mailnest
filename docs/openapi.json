@@ -1400,7 +1400,7 @@
                 "schema": {
                   "type": "string"
                 },
-                "example": "event: ready\ndata: {\"unreadCount\":3}\n\nevent: mail\ndata: {\"accountId\":\"account-id\",\"count\":1,\"unreadCount\":4}\n\n"
+                "example": "event: ready\ndata: {\"unreadCount\":3}\n\nevent: mail\ndata: {\"accountId\":\"account-id\",\"count\":1,\"notificationId\":\"2d8f6e32-7e34-4b7b-a664-c740873398ad\",\"unreadCount\":4}\n\n"
               }
             }
           },
@@ -1425,7 +1425,7 @@
             "sessionCookie": []
           }
         ],
-        "description": "当前用户会话订阅；浏览器 EventSource 使用 Cookie。事件 ready:{unreadCount}、mail:{accountId,count,unreadCount}、sync:{accountId,status,unreadCount}，status 为 syncing / connected / partial / error；partial 表示部分目录失败，可刷新账号查询 error 中的原因。新邮件通知只在后续同步发现新邮件时产生。每用户最多 10 条并发连接，每 25 秒保活；会话过期 / 注销 / 修改密码时关闭连接。连接中断后客户端可重新连接；事件不保证持久重放。 unreadCount 为本人全部账号最近取得的 INBOX 未读数之和；不按缓存邮件或多个标签双计，0 可清除角标。事件数据结构见 ReadyEvent / MailEvent / SyncEvent。"
+        "description": "当前用户会话订阅；浏览器 EventSource 使用 Cookie。事件 ready:{unreadCount}、mail:{accountId,count,notificationId,unreadCount}、sync:{accountId,status,unreadCount}，status 为 syncing / connected / partial / error；partial 表示部分目录失败，可刷新账号查询 error 中的原因。INBOX 自身成功同步建立基线后，后续新到邮件均提醒，包括已被其他客户端标为已读的邮件；首次导入及 UIDVALIDITY 重置时不将历史邮件作为新邮件提醒。notificationId 为本批次 UUID，与正常 Web Push 相同，用于前后台去重。每用户最多 10 条并发连接，每 25 秒保活；会话过期 / 注销 / 修改密码时关闭连接。连接中断后客户端可重新连接；事件不保证持久重放。 unreadCount 为本人全部账号最近取得的 INBOX 未读数之和；不按缓存邮件或多个标签双计，0 可清除角标。事件数据结构见 ReadyEvent / MailEvent / SyncEvent。"
       }
     },
     "/push/subscriptions": {
@@ -2839,12 +2839,18 @@
             "type": "integer",
             "minimum": 0,
             "description": "本人所有邮箱最近取得的远端收件箱未读数之和 SUM(accounts.unread)，不重复统计标签或缓存邮件行。0 表示可清除应用角标。"
+          },
+          "notificationId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "本批新到邮件的通知 UUID；正常 Web Push 与对应 SSE 共用，用于避免重复展示。"
           }
         },
         "required": [
           "accountId",
           "count",
-          "unreadCount"
+          "unreadCount",
+          "notificationId"
         ]
       },
       "SyncEvent": {
@@ -3038,7 +3044,7 @@
       },
       "PushNotification": {
         "type": "object",
-        "description": "正常新邮件与显式测试发送给 Service Worker 的 Web Push JSON；测试不会改变未读数。",
+        "description": "正常新邮件与显式测试发送给 Service Worker 的 Web Push JSON；测试不会改变未读数。正常新邮件含 notificationId，与对应 SSE 相同；测试通知不含该字段。",
         "properties": {
           "title": {
             "type": "string"
@@ -3057,6 +3063,11 @@
             "type": "integer",
             "minimum": 0,
             "description": "本人所有邮箱最近取得的远端收件箱未读数之和 SUM(accounts.unread)，不重复统计标签或缓存邮件行。0 表示可清除应用角标。"
+          },
+          "notificationId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "本批新到邮件的通知 UUID；正常 Web Push 与对应 SSE 共用，用于避免重复展示。"
           }
         },
         "required": [

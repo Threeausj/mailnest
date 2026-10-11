@@ -76,9 +76,15 @@ docker compose logs --tail=100 mailnest
 
 Android / 桌面可使用浏览器安装菜单；iPhone / iPad 可在 Safari 的分享菜单选择“添加到主屏幕”。启用通知需要用户主动授权，iOS / iPadOS 16.4+ 的 Web Push 要从主屏幕应用内启用。[WebKit 官方说明](https://webkit.org/blog/13878/web-push-for-web-apps-on-ios-and-ipados/)
 
-页面打开时通过 SSE 接收同步 / 新邮件事件；配置 VAPID 并订阅后，后台通过 Web Push 提醒。推送订阅不拦截 DNS / IP 地址，沿用运行环境的 TUN / 代理连接；设置页会重新登记已有订阅，服务端确认后才显示已开启。提醒由同步发现新邮件触发，实际送达受浏览器、系统通知权限和网络影响。首次同步不会将已有邮件作为新邮件提醒。Service Worker 只缓存应用静态资源，不缓存登录后的邮件 API 或附件；离线页面不提供邮件收发。
+提醒由定时同步发现新邮件触发，默认每 60 秒轮询，并非即时 IMAP 通知；登录后可从 `/api/v1/config` 的 `pollingInterval` 验证间隔。INBOX 首次成功同步及 UIDVALIDITY 重置时建立安静基线，之后发现的新到邮件会提醒，包括已被其他客户端先读过的邮件；未读角标仍按真实未读数计算。
+
+页面打开时通过 SSE 接收同步 / 新邮件事件，后台通过 Web Push 提醒。同一批前台与后台提醒共用 `notificationId`，由 Service Worker 去重；同账号使用稳定通知 tag，新一批通过 `renotify` 再次提醒。去重用 IndexedDB 仅保存不含业务内容的 UUID 和时间，保留 7 天、最多 128 条，不保存正文或凭据。Service Worker 只缓存应用静态资源，不缓存登录后的邮件 API 或附件；离线页面不提供邮件收发。
+
+推送订阅不拦截 DNS / IP 地址，沿用运行环境的 TUN / 代理连接。登录、回到前台、网络恢复或 Service Worker 切换时，会自动补登记已有且与当前 VAPID 公钥匹配的订阅；不会自动创建订阅或申请通知许可。公钥变更时需在“设置 → 应用与提醒”重新开启，服务端确认登记后才显示已开启。实际送达受浏览器、系统通知权限和网络影响。
 
 在“设置 → 应用与提醒”开启本设备后台提醒后，可点击“发送测试通知”，走与新邮件相同的服务器 Web Push 投递链路。成功提示表示推送服务已接受请求，请同时检查设备系统通知；仅测试当前设备，每 15 秒最多一次，过期订阅需重新开启。测试不会增加未读邮件数。
+
+当前用户已确认设备能收到测试通知，自动新邮件的真机送达仍待验收。排查时可查看服务器日志的 `New-mail push accepted` / `New-mail push failed`；日志不包含 endpoint、订阅密钥或邮件正文，accepted 也不表示设备已送达。
 
 应用内提醒铃铛和手机收件箱显示总未读数字红点；较窄阅读区的铃铛收起时，“更多”按钮及提醒菜单保留数字（超过 99 显示 99+），页面标题显示总未读数；与当前筛选、搜索或账号无关，数据口径为所有账号远端收件箱的未读数之和。支持 Badging API 的已安装应用同步系统图标数字，后台推送也携带真实总未读数；清零与退出登录清除角标。iOS / iPadOS 16.4+ 主屏幕应用的角标受通知权限控制，Android 桌面红点或数字由系统通知 / 启动器支持决定。[WebKit 角标说明](https://webkit.org/blog/14112/badging-for-home-screen-web-apps/)、[Chrome 平台说明](https://developer.chrome.com/docs/capabilities/web-apis/badging-api)
 

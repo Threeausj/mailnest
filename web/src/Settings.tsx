@@ -5,15 +5,12 @@ import { ErrorNotice, formatDate, Modal, Spinner } from './components';
 import type { Account, Config, Token, User } from './types';
 import { PwaInstallButton, PwaInstallGuide } from './PwaInstall';
 import type { PwaInstallController } from './PwaInstall';
+import { decodePushPublicKey, ensureExistingPushSubscription, registerPushSubscription, subscriptionMatchesPublicKey } from './pushSubscription';
 
 interface Props {
   accounts: Account[]; user: User; config: Config | null; onClose: () => void; onAddAccount: () => void; onEditAccount: (account: Account) => void;
   onRefresh: () => void; onToast: (message: string) => void; onLogout: () => void;
   install: PwaInstallController;
-}
-async function registerPush(subscription: PushSubscription) {
-  const { keys } = subscription.toJSON();
-  await post('/push/subscriptions', { endpoint: subscription.endpoint, keys });
 }
 export default function Settings({ accounts, user, config, onClose, onAddAccount, onEditAccount, onRefresh, onToast, onLogout, install }: Props) {
   const [tab, setTab] = useState<'accounts' | 'security' | 'app'>('accounts');
@@ -40,14 +37,12 @@ export default function Settings({ accounts, user, config, onClose, onAddAccount
   useEffect(() => {
     if (tab !== 'app') return;
     let active = true;
+    setPermission(typeof Notification === 'undefined' ? 'unsupported' : Notification.permission);
     setPushChecking(true);
     void (async () => {
       try {
-        const registration = 'serviceWorker' in navigator && config?.pushPublicKey ? await navigator.serviceWorker.getRegistration() : undefined;
-        const subscription = await registration?.pushManager?.getSubscription();
-        if (!active) return;
-        if (subscription) await registerPush(subscription);
-        if (active) setPushActive(Boolean(subscription));
+        const registered = config?.pushPublicKey ? await ensureExistingPushSubscription(config.pushPublicKey) : false;
+        if (active) setPushActive(registered);
       } catch (error) {
         if (active) { setPushActive(false); setError(errorText(error)); }
       } finally { if (active) setPushChecking(false); }
@@ -95,10 +90,15 @@ export default function Settings({ accounts, user, config, onClose, onAddAccount
       const registration = await navigator.serviceWorker.getRegistration();
       if (!registration?.active) throw new Error('应用服务尚未就绪，请稍后重试。');
       if (!registration.pushManager) throw new Error('此浏览器不支持 Web Push。请在支持的浏览器中安装应用后重试。');
-      const base64 = config.pushPublicKey.replace(/-/g, '+').replace(/_/g, '/');
-      const key = Uint8Array.from(atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, '=')), (character) => character.charCodeAt(0));
-      const subscription = await registration.pushManager.getSubscription() || await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
-      await registerPush(subscription);
+      const key = decodePushPublicKey(config.pushPublicKey);
+      let subscription = await registration.pushManager.getSubscription();
+      if (subscription && !subscriptionMatchesPublicKey(subscription, config.pushPublicKey)) {
+        await remove('/push/subscriptions', { endpoint: subscription.endpoint });
+        await subscription.unsubscribe();
+        subscription = null;
+      }
+      subscription ||= await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+      await registerPushSubscription(subscription);
       setPushActive(true); onToast('后台邮件提醒已开启。');
     } catch (error) { setError(errorText(error)); } finally { setBusy(''); }
   }

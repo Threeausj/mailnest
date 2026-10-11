@@ -13,6 +13,7 @@ import { PwaInstallButton, PwaInstallGuide, usePwaInstall } from './PwaInstall';
 import { PaneDivider, PaneDragShield, usePaneSizes } from './PaneResize';
 import { useAppHistory, withoutOverlay, type AppHistoryView } from './useAppHistory';
 import { useAppBadge } from './useAppBadge';
+import { ensureExistingPushSubscription } from './pushSubscription';
 import type { Account, Config, Message, MessageSummary, User } from './types';
 
 function EmptyIllustration() {
@@ -164,6 +165,27 @@ export default function App() {
     return () => controller.abort();
   }, [user]);
   useEffect(() => {
+    if (!user || !config?.pushPublicKey || !('serviceWorker' in navigator)) return;
+    let closed = false; let registering = false;
+    const restoreSubscription = () => {
+      if (closed || registering || document.hidden || !navigator.onLine) return;
+      registering = true;
+      void ensureExistingPushSubscription(config.pushPublicKey!)
+        .catch(() => { /* Settings offers an explicit retry if registration fails. */ })
+        .finally(() => { registering = false; });
+    };
+    restoreSubscription();
+    window.addEventListener('focus', restoreSubscription); window.addEventListener('online', restoreSubscription);
+    document.addEventListener('visibilitychange', restoreSubscription);
+    navigator.serviceWorker.addEventListener('controllerchange', restoreSubscription);
+    return () => {
+      closed = true;
+      window.removeEventListener('focus', restoreSubscription); window.removeEventListener('online', restoreSubscription);
+      document.removeEventListener('visibilitychange', restoreSubscription);
+      navigator.serviceWorker.removeEventListener('controllerchange', restoreSubscription);
+    };
+  }, [user, config?.pushPublicKey]);
+  useEffect(() => {
     if (!user) return;
     const controller = new AbortController(); const badgeVersion = unreadRevision.current; setAccountsError('');
     api<{ accounts: Account[] }>('/accounts', { signal: controller.signal }).then((result) => {
@@ -217,12 +239,16 @@ export default function App() {
       updateUnread(event);
       refresh();
       try {
-        const data = JSON.parse((event as MessageEvent).data); const count = Number(data.count) || 1;
+        const data = JSON.parse((event as MessageEvent).data);
+        const count = Number.isSafeInteger(data.count) && data.count > 0 ? data.count : 1;
         setToast(`收到 ${count} 封新邮件。`);
         if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-          navigator.serviceWorker?.getRegistration().then(async (registration) => {
-            const subscription = await registration?.pushManager?.getSubscription();
-            if (!subscription && registration) await registration.showNotification('邮屿 · 新邮件', { body: `你收到 ${count} 封新邮件，打开邮屿查看。`, icon: '/icon-192.png', tag: 'mailnest-new-mail' });
+          navigator.serviceWorker?.getRegistration().then((registration) => {
+            // The worker deduplicates this SSE event and its matching Web Push.
+            registration?.active?.postMessage({ type: 'MAIL_NOTIFICATION', payload: {
+              title: '邮屿 · 新邮件', body: `你收到 ${count} 封新邮件，打开邮屿查看。`,
+              accountId: data.accountId, notificationId: data.notificationId, unreadCount: data.unreadCount,
+            } });
           }).catch(() => {});
         }
       } catch { /* A refresh still handles an invalid event payload. */ }

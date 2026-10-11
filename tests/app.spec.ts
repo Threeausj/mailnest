@@ -1654,7 +1654,157 @@ test('push worker uses an exact unread number for the application badge and pres
     expect(notification.options.badge).toBe('/icon-192.png');
   }
   expect(result.notifications.slice(0,-1).map((notification: any) => notification.options.tag)).toEqual(Array(5).fill('mailnest-new-mail'));
+  expect(result.notifications.slice(0,-1).every((notification: any) => notification.options.renotify)).toBe(true);
   expect(result.notifications.at(-1).options.tag).toBe('mailnest-test');
+  expect(result.notifications.at(-1).options.renotify).toBe(true);
+});
+
+test('push worker deduplicates matching push and trusted client notifications across restarts and retries failed displays', async ({ page }) => {
+  await page.goto('/');
+  const workerSource = await (await page.request.get('/sw.js')).text();
+  const result = await page.evaluate(async source => {
+    const ids = Array.from({length:5},() => crypto.randomUUID());
+    const run = async (groups: any[][], memoryOnly = false) => {
+      const script = `
+        const calls = [], attempts = [], displayed = [], completions = [];
+        let rejectDisplay = false;
+        ${memoryOnly ? "Object.defineProperty(self,'indexedDB',{get(){throw Error('Fixture unavailable');}});" : ''}
+        Object.defineProperty(navigator,'setAppBadge',{value:async count => calls.push({type:'set',count})});
+        Object.defineProperty(navigator,'clearAppBadge',{value:async () => calls.push({type:'clear'})});
+        self.registration = {showNotification:async (title,options) => {
+          attempts.push({title,options});
+          if(rejectDisplay)throw Error('Fixture display rejected');
+          displayed.push({title,options});
+        }};
+        ${source}
+        self.onmessage = async event => {
+          if (!Array.isArray(event.data)) return;
+          try {
+            for(const group of event.data){
+              const pending = [];
+              rejectDisplay = Boolean(group[0].rejectDisplay);
+              for(const command of group){
+                const event = new Event(command.entry === 'client' ? 'message' : 'push');
+                event.waitUntil = promise => pending.push(Promise.resolve(promise));
+                if(command.entry === 'client'){
+                  event.data = {type:'MAIL_NOTIFICATION',payload:command.payload};
+                  event.source = {type:command.sourceType || 'window',url:command.sourceUrl || self.location.origin+'/'};
+                  event.origin = command.origin || self.location.origin;
+                } else event.data = {json:() => command.payload};
+                self.dispatchEvent(event);
+              }
+              completions.push((await Promise.allSettled(pending)).map(result => result.status));
+            }
+            self.postMessage({calls,attempts,displayed,completions,origin:self.location.origin});
+          }catch(error){self.postMessage({error:String(error)});}
+        };
+      `;
+      const url = URL.createObjectURL(new Blob([script],{type:'text/javascript'}));
+      const worker = new Worker(url);
+      try {
+        return await new Promise<any>((resolve,reject) => {
+          worker.onmessage = event => resolve(event.data);
+          worker.onerror = event => reject(new Error(event.message));
+          worker.postMessage(groups);
+        });
+      } finally {worker.terminate();URL.revokeObjectURL(url);}
+    };
+    const payload = (id: string, unreadCount: number) => ({notificationId:id,accountId:'fixture-account',tag:'mail-fixture-account',title:'合成新邮件',body:'合成通知正文，不应持久化',unreadCount});
+    const first = await run([
+      [{entry:'client',payload:payload(ids[0],3)},{entry:'push',payload:payload(ids[0],4)}],
+      [{entry:'push',payload:payload(ids[1],5)}],
+      [{entry:'client',sourceUrl:'https://foreign.example.test/',origin:'https://foreign.example.test',payload:payload(ids[2],99)}],
+      [{entry:'client',sourceType:'serviceworker',payload:payload(ids[2],99)}],
+      [{entry:'client',origin:'https://foreign.example.test',payload:payload(ids[2],99)}],
+      [{entry:'push',payload:{title:'兼容旧通知',unreadCount:0}}],
+      [{entry:'push',rejectDisplay:true,payload:payload(ids[2],6)}],
+      [{entry:'client',payload:payload(ids[2],7)}],
+    ]);
+    const restart = await run([
+      [{entry:'push',payload:payload(ids[0],8)},{entry:'client',payload:payload(ids[1],9)}],
+      [{entry:'push',payload:payload(ids[3],10)}],
+    ]);
+    const fallback = await run([[{entry:'push',payload:payload(ids[4],11)},{entry:'client',payload:payload(ids[4],12)}]],true);
+    const records = await new Promise<any[]>((resolve,reject) => {
+      const request = indexedDB.open('mailnest-notification-history',1);
+      request.onsuccess = () => {
+        const database = request.result;
+        try {
+          const transaction = database.transaction('shown','readonly');
+          const records = transaction.objectStore('shown').getAll();
+          records.onsuccess = () => {resolve(records.result);database.close();};
+          records.onerror = () => reject(records.error);
+          transaction.onabort = () => reject(transaction.error);
+        } catch (error) {
+          database.close();
+          reject(new Error(`Worker history unavailable (${first.origin}): ${String(error)}`));
+        }
+      };
+      request.onerror = () => reject(request.error);
+    });
+    return {ids,first,restart,fallback,records};
+  },workerSource);
+  for (const round of [result.first,result.restart,result.fallback]) expect(round.error).toBeUndefined();
+  expect(result.first.displayed).toHaveLength(4);
+  expect(result.first.attempts).toHaveLength(5);
+  expect(result.first.completions[0]).toEqual(['fulfilled','fulfilled']);
+  expect(result.first.completions[6]).toEqual(['rejected']);
+  expect(result.first.completions[7]).toEqual(['fulfilled']);
+  expect(result.first.calls).toEqual([3,4,5,0,6,7].map(count => count ? {type:'set',count} : {type:'clear'}));
+  expect(result.restart.displayed).toHaveLength(1);
+  expect(result.restart.calls).toEqual([8,9,10].map(count => ({type:'set',count})));
+  expect(result.fallback.displayed).toHaveLength(1);
+  expect(result.fallback.calls).toEqual([11,12].map(count => ({type:'set',count})));
+  for (const notification of [...result.first.displayed,...result.restart.displayed,...result.fallback.displayed]) {
+    expect(notification.options.renotify).toBe(true);
+    expect(notification.options.tag).toBe(notification.title === '兼容旧通知' ? 'mailnest-new-mail' : 'mail-fixture-account');
+  }
+  expect(result.records.map(record => record.id).sort()).toEqual(result.ids.slice(0,4).sort());
+  for (const record of result.records) {
+    expect(Object.keys(record).sort()).toEqual(['id','shownAt']);
+    expect(Number.isFinite(record.shownAt)).toBe(true);
+  }
+});
+
+test('new mail SSE reaches the notification worker despite an existing subscription and failed registration, then foreground recovery retries', async ({ page }) => {
+  const publicKey = Buffer.concat([Buffer.from([4]),Buffer.alloc(64,1)]).toString('base64url');
+  const subscription = {endpoint:'https://push.example.test/sse-fixture',keys:{p256dh:publicKey,auth:Buffer.alloc(16,2).toString('base64url')}};
+  await page.addInitScript(subscription => {
+    const state = {messages:[] as unknown[],subscribeCalls:0,permission:'granted'};
+    (window as any).__ssePushFixture = state;
+    class FixtureNotification {static get permission(){return state.permission;} static async requestPermission(){throw Error('Automatic recovery must not request permission');}}
+    Object.defineProperty(window,'Notification',{value:FixtureNotification,configurable:true});
+    const registration = {
+      active:{postMessage:(message: unknown) => state.messages.push(message)},waiting:null,installing:null,addEventListener(){},
+      pushManager:{getSubscription:async () => ({...subscription,toJSON:() => subscription}),subscribe:async () => {state.subscribeCalls++;throw Error('Automatic recovery must not subscribe');}},
+    };
+    Object.defineProperty(navigator,'serviceWorker',{configurable:true,value:{
+      controller:null,ready:Promise.resolve(registration),addEventListener(){},removeEventListener(){},
+      getRegistration:async () => registration,register:async () => registration,
+    }});
+  },subscription);
+  await mockMailboxEvents(page);
+  await mockMailbox(page,mailboxMessages(1).map(message => ({...message,unread:false})));
+  await page.route('**/api/v1/config',route => route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({googleConfigured:false,pushPublicKey:publicKey,pollingInterval:3600})}));
+  const registrations: unknown[] = [];
+  await page.route('**/api/v1/push/subscriptions',route => {
+    registrations.push(route.request().postDataJSON());
+    return route.fulfill({status:registrations.length === 1 ? 503 : 200,contentType:'application/json',body:JSON.stringify(registrations.length === 1 ? {error:{code:'PUSH_DELIVERY_FAILED',message:'合成注册失败'}} : {ok:true})});
+  });
+  const fixture = () => page.evaluate(() => ({...(window as any).__ssePushFixture}));
+  await page.goto('/');
+  await expect.poll(() => registrations.length).toBe(1);
+  const notificationId = await page.evaluate(() => crypto.randomUUID());
+  await page.evaluate(payload => (window as any).__emitMailboxEvent('mail',payload),{accountId:'density-account',count:1,unreadCount:2,notificationId});
+  await expect.poll(async () => (await fixture()).messages.length).toBe(1);
+  expect((await fixture()).messages[0]).toMatchObject({type:'MAIL_NOTIFICATION',payload:{accountId:'density-account',notificationId,unreadCount:2}});
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  await expect.poll(() => registrations.length).toBe(2);
+  expect(registrations).toEqual([subscription,subscription]);
+  expect((await fixture()).subscribeCalls).toBe(0);
+  await page.evaluate(() => { (window as any).__ssePushFixture.permission = 'denied'; });
+  await page.evaluate(() => (window as any).__emitMailboxEvent('mail',{count:1,notificationId:crypto.randomUUID()}));
+  expect((await fixture()).messages).toHaveLength(1);
 });
 
 test('existing push subscription requires server acknowledgment, retries and survives settings reopen before disable', async ({ page }) => {
@@ -1686,7 +1836,7 @@ test('existing push subscription requires server acknowledgment, retries and sur
     Object.defineProperty(navigator,'serviceWorker',{
       configurable:true,
       value:{
-        controller:null,ready:Promise.resolve(registration),addEventListener() {},
+        controller:null,ready:Promise.resolve(registration),addEventListener() {},removeEventListener() {},
         getRegistration:async () => registration,
         register:async () => registration,
       },
@@ -1698,6 +1848,8 @@ test('existing push subscription requires server acknowledgment, retries and sur
     body:JSON.stringify({googleConfigured:false,pushPublicKey:publicKey,pollingInterval:3600}),
   }));
   const registrations: unknown[] = [];
+  const automaticRegistrations: unknown[] = [];
+  let checkingSettings = false;
   const deletions: unknown[] = [];
   const notificationTests: unknown[] = [];
   const releaseRegistrations = new Map<number,() => void>();
@@ -1706,6 +1858,10 @@ test('existing push subscription requires server acknowledgment, retries and sur
   await page.route('**/api/v1/push/subscriptions',async route => {
     const request = route.request();
     if (request.method() === 'POST') {
+      if (!checkingSettings) {
+        automaticRegistrations.push(request.postDataJSON());
+        return route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({ok:true})});
+      }
       registrations.push(request.postDataJSON());
       const attempt = registrations.length;
       await new Promise<void>(resolve => releaseRegistrations.set(attempt,resolve));
@@ -1731,9 +1887,11 @@ test('existing push subscription requires server acknowledgment, retries and sur
   });
   const pushState = () => page.evaluate(() => ({...(window as any).__pushFixture}));
   await page.goto('/');
+  await expect.poll(() => automaticRegistrations.length).toBe(1);
   await (await headerUtility(page,'邮件提醒设置')).click();
   const settings = page.getByRole('dialog',{name:'设置',exact:true});
   expect(registrations).toHaveLength(0);
+  checkingSettings = true;
   await settings.getByRole('tab',{name:'应用与提醒',exact:true}).click();
   await expect.poll(() => registrations.length).toBe(1);
   await expect(settings.getByRole('button',{name:'检查中…',exact:true})).toBeDisabled();
@@ -1804,6 +1962,59 @@ test('existing push subscription requires server acknowledgment, retries and sur
   expect(await pushState()).toEqual({subscribeCalls:0,unsubscribeCalls:1,permissionCalls:1,localSubscribed:false});
   expect(registrations).toHaveLength(3);
   await noHorizontalOverflow(page);
+});
+
+test('changed push application key stays inactive until explicit enable replaces the old subscription', async ({ page }) => {
+  const oldKey = Buffer.concat([Buffer.from([4]),Buffer.alloc(64,1)]).toString('base64url');
+  const newKey = Buffer.concat([Buffer.from([4]),Buffer.alloc(64,3)]).toString('base64url');
+  const auth = Buffer.alloc(16,2).toString('base64url');
+  const oldSubscription = {endpoint:'https://push.example.test/previous-key',keys:{p256dh:oldKey,auth}};
+  const newSubscription = {endpoint:'https://push.example.test/current-key',keys:{p256dh:newKey,auth}};
+  await page.addInitScript(({oldKey,newKey,oldSubscription,newSubscription}) => {
+    const decode = (key: string) => Uint8Array.from(atob(key.replace(/-/g,'+').replace(/_/g,'/').padEnd(Math.ceil(key.length/4)*4,'=')),character => character.charCodeAt(0));
+    const state = {current:'old',subscribeCalls:0,unsubscribeCalls:0,permissionCalls:0,subscribedKey:[] as number[]};
+    (window as any).__keyPushFixture = state;
+    class FixtureNotification {static permission='granted';static async requestPermission(){state.permissionCalls++;return 'granted';}}
+    Object.defineProperty(window,'Notification',{value:FixtureNotification,configurable:true});
+    const old = {...oldSubscription,options:{applicationServerKey:decode(oldKey).buffer},toJSON:() => oldSubscription,unsubscribe:async () => {state.unsubscribeCalls++;state.current='';return true;}};
+    const current = {...newSubscription,options:{applicationServerKey:decode(newKey).buffer},toJSON:() => newSubscription,unsubscribe:async () => {state.current='';return true;}};
+    const registration = {
+      active:{postMessage(){}},waiting:null,installing:null,addEventListener(){},
+      pushManager:{
+        getSubscription:async () => state.current === 'old' ? old : state.current === 'new' ? current : null,
+        subscribe:async (options: {applicationServerKey:Uint8Array}) => {state.subscribeCalls++;state.subscribedKey=Array.from(options.applicationServerKey);state.current='new';return current;},
+      },
+    };
+    Object.defineProperty(navigator,'serviceWorker',{configurable:true,value:{controller:null,ready:Promise.resolve(registration),addEventListener(){},removeEventListener(){},getRegistration:async () => registration,register:async () => registration}});
+  },{oldKey,newKey,oldSubscription,newSubscription});
+  await mockMailbox(page);
+  await page.route('**/api/v1/config',route => route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({googleConfigured:false,pushPublicKey:newKey,pollingInterval:3600})}));
+  const operations: {method:string,body:unknown}[] = [];
+  let releaseRegistration = () => {};
+  await page.route('**/api/v1/push/subscriptions',async route => {
+    const request = route.request();
+    operations.push({method:request.method(),body:request.postDataJSON()});
+    if(request.method() === 'POST') await new Promise<void>(resolve => {releaseRegistration=resolve;});
+    return route.fulfill({status:200,contentType:'application/json',body:'{"ok":true}'});
+  });
+  const fixture = () => page.evaluate(() => ({...(window as any).__keyPushFixture}));
+  await page.goto('/');
+  await (await headerUtility(page,'邮件提醒设置')).click();
+  const settings = page.getByRole('dialog',{name:'设置',exact:true});
+  await settings.getByRole('tab',{name:'应用与提醒',exact:true}).click();
+  await expect(settings.getByRole('button',{name:'开启提醒',exact:true})).toBeEnabled();
+  expect(operations).toEqual([]);
+  expect(await fixture()).toMatchObject({current:'old',subscribeCalls:0,unsubscribeCalls:0,permissionCalls:0});
+  await expect(settings.getByText('本设备已开启后台邮件提醒。',{exact:true})).toHaveCount(0);
+  await settings.getByRole('button',{name:'开启提醒',exact:true}).click();
+  await expect.poll(() => operations.length).toBe(2);
+  expect(operations).toEqual([{method:'DELETE',body:{endpoint:oldSubscription.endpoint}},{method:'POST',body:newSubscription}]);
+  expect(await fixture()).toMatchObject({current:'new',subscribeCalls:1,unsubscribeCalls:1,permissionCalls:1,subscribedKey:Array.from(Buffer.from(newKey,'base64url'))});
+  await expect(settings.getByRole('button',{name:'处理中…',exact:true})).toBeDisabled();
+  await expect(settings.getByText('本设备已开启后台邮件提醒。',{exact:true})).toHaveCount(0);
+  releaseRegistration();
+  await expect(settings.getByText('本设备已开启后台邮件提醒。',{exact:true})).toBeVisible();
+  await expect(settings.getByRole('button',{name:'关闭后台提醒',exact:true})).toBeEnabled();
 });
 
 test('install entry remains available without a browser prompt and explains HTTP limitations', async ({ page }) => {

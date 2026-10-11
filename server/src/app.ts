@@ -45,13 +45,21 @@ export async function buildApp(config:Config=loadConfig()) {
   };
   const closeUserEvents=(userId:string,sessionId?:string)=>{for(const client of clients)if(client.userId===userId&&(!sessionId||client.sessionId===sessionId)){client.response.end();clients.delete(client);}};
   if(config.vapidPublicKey&&config.vapidPrivateKey)webPush.setVapidDetails(config.vapidSubject,config.vapidPublicKey,config.vapidPrivateKey);
-  async function notify(userId:string,accountId:string,count:number) {
+  async function notify(userId:string,accountId:string,count:number,notificationId:string=randomUUID()) {
     if(!config.vapidPublicKey||!config.vapidPrivateKey)return;
     const rows=store.db.prepare('SELECT endpoint,subscription FROM push_subscriptions WHERE user_id=?').all(userId) as {endpoint:string;subscription:string}[];
-    const payload=JSON.stringify({title:'MailNest 新邮件',body:`有 ${count} 封新邮件等待查看`,url:`/?account=${encodeURIComponent(accountId)}`,tag:`mail-${accountId}`,unreadCount:unreadCount(userId)});
+    const payload=JSON.stringify({title:'MailNest 新邮件',body:`有 ${count} 封新邮件等待查看`,url:`/?account=${encodeURIComponent(accountId)}`,tag:`mail-${accountId}`,notificationId,unreadCount:unreadCount(userId)});
     await Promise.allSettled(rows.map(async row=>{
-      try{await webPush.sendNotification(JSON.parse(row.subscription),payload,{TTL:300,timeout:10_000});}
-      catch(error){const code=pushStatus(error);if(code===404||code===410)store.db.prepare('DELETE FROM push_subscriptions WHERE endpoint=? AND user_id=? AND subscription=?').run(row.endpoint,userId,row.subscription);}
+      const subscriptionId=createHash('sha256').update(row.endpoint).digest('hex').slice(0,12);
+      try {
+        const response=await webPush.sendNotification(JSON.parse(row.subscription),payload,{TTL:300,timeout:10_000});
+        app.log.info({notificationId,accountId,subscriptionId,statusCode:response.statusCode},'New-mail push accepted');
+      } catch(error) {
+        const code=pushStatus(error),expired=code===404||code===410;
+        if(expired)store.db.prepare('DELETE FROM push_subscriptions WHERE endpoint=? AND user_id=? AND subscription=?').run(row.endpoint,userId,row.subscription);
+        // Provider errors can contain full endpoint URLs and authorization keys.
+        app.log.warn({notificationId,accountId,subscriptionId,statusCode:typeof code==='number'?code:undefined,category:expired?'PUSH_SUBSCRIPTION_EXPIRED':'PUSH_DELIVERY_FAILED'},'New-mail push failed');
+      }
     }));
   }
   const mail=new MailService(store,config,emit,notify);

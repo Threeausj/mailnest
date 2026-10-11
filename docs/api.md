@@ -157,13 +157,15 @@ Google OAuth 邮箱只允许修改 `name` / `color`，修改地址、服务器�
 
 先在已登录浏览器请求 `GET /oauth/google/start`，取得 `{url}` 后导航至该地址。Google 回调需保留发起会话，验证 state 和 PKCE，结果跳转 `/?oauth=success` 或 `/?oauth=error&reason=...`。需要配置 Web OAuth 客户端，申请 `openid email` 与 Gmail IMAP / SMTP 的 `https://mail.google.com/` 权限，详情见 [Gmail 配置](gmail.md)。
 
-`GET /events` 返回 `text/event-stream`，使用浏览器 EventSource Cookie 连接。事件 `ready` 为 `{unreadCount}`，`mail` 为 `{accountId,count,unreadCount}`，`sync` 为 `{accountId,status,unreadCount}`，status 为 `syncing` / `connected` / `partial` / `error`；收到 `partial` 后可刷新账号获取具体目录原因。`unreadCount` 是本人全部账号最近取得的远端收件箱未读数之和（`SUM(accounts.unread)`），不是缓存邮件行数，也不重复统计 Gmail 等服务的多个标签；没有邮箱或没有未读时为 0。客户端可用于更新应用数字角标，0 时清除角标；浏览器和操作系统不支持时可保持普通未读显示。每用户最多 10 个连接，每 25 秒保活；会话过期、注销或修改密码时关闭。连接断开后重新连接并刷新列表；当前没有持久事件重放承诺。同步 API 的 `{ok:true}` 表示已调度，不能据此认定已同步完成。
+`GET /events` 返回 `text/event-stream`，使用浏览器 EventSource Cookie 连接。事件 `ready` 为 `{unreadCount}`，`mail` 为 `{accountId,count,notificationId,unreadCount}`，`sync` 为 `{accountId,status,unreadCount}`，status 为 `syncing` / `connected` / `partial` / `error`；收到 `partial` 后可刷新账号获取具体目录原因。`unreadCount` 是本人全部账号最近取得的远端收件箱未读数之和（`SUM(accounts.unread)`），不是缓存邮件行数，也不重复统计 Gmail 等服务的多个标签；没有邮箱或没有未读时为 0。客户端可用于更新应用数字角标，0 时清除角标；浏览器和操作系统不支持时可保持普通未读显示。每用户最多 10 个连接，每 25 秒保活；会话过期、注销或修改密码时关闭。连接断开后重新连接并刷新列表；当前没有持久事件重放承诺。同步 API 的 `{ok:true}` 表示已调度，不能据此认定已同步完成。
 
 `POST /push/subscriptions` 传入浏览器 PushManager 的 `{endpoint,keys:{p256dh,auth}}`；`DELETE` 传入 `{endpoint}`。每用户最多 20 个推送设备，同一本人的 endpoint 重复提交会更新订阅密钥，达到上限时仍可更新，不能覆盖其他人的 endpoint。仅接受浏览器提供的 Google / Mozilla / Apple / Windows HTTPS 推送服务地址，保留订阅格式与 TLS 证书校验；注册时不做 DNS / IP 地址拦截，实际连接由运行环境或 TUN 代理处理，无需为推送设置 `ALLOW_PRIVATE_MAIL_HOSTS`。
 
 `POST /push/test` 传入 `{endpoint}`，使用服务端保存的订阅密钥，仅向当前用户的这一台已登记设备发送测试通知，不群发。成功响应为 `{ok:true,accepted:true}`，表示推送服务已接受请求，不保证设备已经收到或系统一定显示通知；只有用户点击测试按钮才调用该接口。每用户所有设备共用 15 秒测试间隔，发送失败也占用本次间隔；过于频繁返回 `429 PUSH_TEST_RATE_LIMIT`，并通过 `Retry-After` 告知需等待的秒数。未知或不属于本人订阅返回相同的 `404 PUSH_SUBSCRIPTION_NOT_FOUND`；服务商返回 404 / 410 时删除该设备的过期订阅并返回 `410 PUSH_SUBSCRIPTION_EXPIRED`，需要重新开启提醒；其他发送失败返回 `503 PUSH_DELIVERY_FAILED`，稍后可重试，保留订阅。未配置 VAPID 返回 `503 PUSH_NOT_CONFIGURED`。接口不做 DNS / IP 预检，仍限制浏览器服务商 HTTPS 地址并校验 TLS，不返回 endpoint、订阅密钥或服务商的原始错误。
 
-新邮件和测试通知的 Push JSON 均包含 `{title,body,url,tag,unreadCount}`。未读总数与 SSE 使用相同口径；测试不会制造未读邮件，也不会修改已有未读状态。需要 VAPID 公私钥、用户主动授权、HTTPS 和浏览器支持。设置页会将浏览器已有订阅重新登记，服务端保存成功后才显示已开启；失败可直接重试，不会仅凭浏览器存在订阅就显示成功。新邮件提醒由后续同步发现新邮件触发，首次同步旧邮件不提醒。Push 送达及显示依赖浏览器和系统。日志不应保存邮件秘密或推送授权信息。
+新邮件和测试通知的 Push JSON 均包含 `{title,body,url,tag,unreadCount}`；正常新邮件另含 `notificationId` UUID，与对应 SSE `mail` 事件相同。未读总数与 SSE 使用相同口径；测试不会制造未读邮件，也不会修改已有未读状态。INBOX 建立成功同步基线后，后续发现的新到邮件都会触发提醒，包括已被其他客户端标为已读的邮件；首次导入及 UIDVALIDITY 重置时不会将历史邮件作为新邮件提醒。
+
+前台 SSE 与后台 Push 通过同一 Service Worker 展示，同一 `notificationId` 只提醒一次；普通通知按邮箱归组，并开启 `renotify`，后续不同批次仍再次提醒。Worker 仅持久保存通知 UUID 与展示时间，最多 128 条、保留 7 天，不保存邮件内容或订阅密钥；存储不可用时使用当前 Worker 内存去重。需要 VAPID 公私钥、用户主动授权、HTTPS 和浏览器支持。登录及回到前台时会将已有且 VAPID 公钥匹配的浏览器订阅重新登记；没有订阅时不会自动请求权限或创建订阅。公钥变更需在设置重新开启提醒；设置页在服务端保存成功后才显示已开启。服务端记录正常新邮件推送的接受 / 失败状态、通知 ID 和订阅摘要，不记录完整 endpoint、授权密钥、邮件内容或服务商原始错误。Push 接受并不保证实际送达或显示。
 
 ## 文档维护
 

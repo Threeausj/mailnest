@@ -14,7 +14,7 @@ import {hashToken} from '../src/security.js';
 
 type Project=Awaited<ReturnType<typeof buildApp>>;
 type SendParameters=Parameters<typeof webPush.sendNotification>;
-type MailHooks={notify:(userId:string,accountId:string,count:number)=>Promise<void>;emit:(userId:string,event:string,data:unknown)=>void};
+type MailHooks={notify:(userId:string,accountId:string,count:number,notificationId?:string)=>Promise<void>;emit:(userId:string,event:string,data:unknown)=>void};
 interface Delivery {calls:SendParameters[];error?:unknown;wait?:Promise<void>;onSend?:()=>void}
 const origin='http://localhost:5173';
 const password='NotificationTest2026!';
@@ -56,7 +56,7 @@ function foreignUser(project:Project) {
 function sendTest(project:Project,cookie:string,url:string) {
   return project.app.inject({method:'POST',url:'/api/v1/push/test',headers:{cookie,origin},payload:{endpoint:url}});
 }
-function payload(call:SendParameters) {return JSON.parse(String(call[1])) as {unreadCount:number;title:string;body:string;url:string;tag:string};}
+function payload(call:SendParameters) {return JSON.parse(String(call[1])) as {unreadCount:number;title:string;body:string;url:string;tag:string;notificationId?:string};}
 
 test('explicit test sends only to the selected owned device, keeps unread state and excludes duplicate labels and other owners',async()=>fixture(async(project,userId,cookie,delivery)=>{
   const first=seedAccount(project,userId,3);seedAccount(project,userId,4);seedAccount(project,userId,0);seedAccount(project,foreignUser(project),500);
@@ -128,9 +128,11 @@ test('normal mail notifications include the total inbox unread count and keep ex
   const account=seedAccount(project,userId,12);seedAccount(project,userId,8);const foreign=foreignUser(project);seedAccount(project,foreign,1000);
   const first=endpoint('normal-first'),second=endpoint('normal-second'),outside=endpoint('outside');seedSubscription(project,userId,first);seedSubscription(project,userId,second);seedSubscription(project,foreign,outside);
   const hooks=project.mail as unknown as MailHooks;
-  await hooks.notify(userId,account,2);assert.deepEqual(delivery.calls.map(call=>call[0].endpoint).sort(),[first,second].sort());
-  for(const call of delivery.calls){assert.equal(payload(call).unreadCount,20);assert.equal(payload(call).body,'有 2 封新邮件等待查看');}
+  const notificationId=randomUUID();
+  await hooks.notify(userId,account,2,notificationId);assert.deepEqual(delivery.calls.map(call=>call[0].endpoint).sort(),[first,second].sort());
+  for(const call of delivery.calls){assert.equal(payload(call).unreadCount,20);assert.equal(payload(call).body,'有 2 封新邮件等待查看');assert.equal(payload(call).notificationId,notificationId);assert.equal(payload(call).tag,`mail-${account}`);}
   delivery.error={statusCode:410};await hooks.notify(userId,account,1);
+  assert.notEqual(payload(delivery.calls[2]).notificationId,notificationId);assert.equal(payload(delivery.calls[2]).notificationId,payload(delivery.calls[3]).notificationId);
   assert.equal(project.store.db.prepare('SELECT COUNT(*) AS n FROM push_subscriptions WHERE user_id=?').get(userId)!.n,0);assert.ok(project.store.db.prepare('SELECT endpoint FROM push_subscriptions WHERE endpoint=?').get(outside));
 }));
 
@@ -145,7 +147,7 @@ test('SSE ready and account updates include the current scoped unread total with
     const hooks=project.mail as unknown as MailHooks;
     project.store.db.prepare('UPDATE accounts SET unread=? WHERE id=?').run(1,first);
     hooks.emit(userId,'sync',{accountId:first,status:'connected'});assert.deepEqual(await nextEvent(),{event:'sync',data:{accountId:first,status:'connected',unreadCount:5}});
-    hooks.emit(userId,'mail',{accountId:second,count:2});assert.deepEqual(await nextEvent(),{event:'mail',data:{accountId:second,count:2,unreadCount:5}});
+    const notificationId=randomUUID();hooks.emit(userId,'mail',{accountId:second,count:2,notificationId});assert.deepEqual(await nextEvent(),{event:'mail',data:{accountId:second,count:2,notificationId,unreadCount:5}});
     project.store.db.prepare('DELETE FROM accounts WHERE user_id=?').run(userId);hooks.emit(userId,'sync',{accountId:second,status:'connected'});assert.equal((await nextEvent()).data.unreadCount,0);
   }finally{await reader.cancel();}
 }));
