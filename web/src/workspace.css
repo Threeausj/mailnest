@@ -1,0 +1,23 @@
+/* The workspace owns vertical scrolling so its heading leaves with the mail. */
+.workspace{min-height:0;overflow:hidden;--workspace-heading-height:56px;--bottom-nav-height:0px}
+.workspace-scroll{flex:1;min-width:0;min-height:0;overflow:auto;overflow-x:hidden;scrollbar-width:thin;scrollbar-color:#dce4d8 transparent}
+.workspace-scroll>.workspace-header{position:static;flex-shrink:0}
+.mail-content{flex:none;align-items:flex-start;min-height:calc(100dvh - var(--workspace-heading-height) - var(--bottom-nav-height))}
+.message-list-pane,.reader-pane{min-height:calc(100dvh - var(--workspace-heading-height) - var(--bottom-nav-height))}
+.message-list-scroll{flex:none;overflow:visible}
+.list-pagination{flex-shrink:0;position:sticky;bottom:0;margin-top:auto;background:#fffefa;z-index:2}
+.reader-pane{overflow:visible;align-self:stretch}
+.reader-toolbar{position:static;flex-shrink:0}
+.sidebar{overflow-y:auto;flex-shrink:0;scrollbar-width:thin;scrollbar-color:#d2ddce transparent}
+.sidebar>*{flex-shrink:0}
+.has-selection .workspace-header{display:flex}
+@media(min-width:1151px){
+  .has-selection .message-list-pane{position:sticky;top:0;align-self:flex-start;width:288px;min-width:288px;height:calc(100dvh - var(--workspace-heading-height));min-height:0}
+  .has-selection .message-list-scroll{flex:1;min-height:0;overflow-y:auto}
+  .has-selection .list-pagination{position:static}
+}
+@media(max-width:767px){
+  .workspace{--workspace-heading-height:98px;--bottom-nav-height:calc(56px + env(safe-area-inset-bottom))}
+  .has-selection .mail-content{min-height:calc(100dvh - var(--workspace-heading-height) - var(--bottom-nav-height))}
+  .mobile-bottom-nav{flex-shrink:0}
+}

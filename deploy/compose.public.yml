@@ -1,0 +1,30 @@
+# 从仓库根目录运行 docker compose -f compose.yml -f deploy/compose.public.yml ...
+services:
+  mailnest:
+    environment:
+      APP_URL: https://${DOMAIN:?请先在 .env 设置 DOMAIN}
+      GOOGLE_REDIRECT_URI: https://${DOMAIN}/api/v1/oauth/google/callback
+      TRUST_PROXY: "true"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      mailnest:
+        condition: service_healthy
+    environment:
+      DOMAIN: ${DOMAIN:?请先在 .env 设置 DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  caddy_data:
+  caddy_config:

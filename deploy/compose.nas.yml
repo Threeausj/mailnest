@@ -1,0 +1,25 @@
+# Current NAS: keep the existing LAN origin and mihomo DNS/Fake-IP routing.
+# Copy to compose.override.yml in /volume2/docker/mailnest after setting .env.
+# This HTTP LAN profile needs Docker Compose >= 2.24.4 for !reset / !override.
+services:
+  mailnest:
+    build:
+      network: host
+    network_mode: host
+    ports: !reset []
+    dns:
+      - 127.0.0.1
+    environment:
+      # Run the compiled app; the existing LAN HTTP origin needs this mode.
+      NODE_ENV: development
+      HOST: 0.0.0.0
+      PORT: 5173
+      APP_URL: ${APP_URL:-http://192.168.91.85:5173}
+      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-http://192.168.91.85:5173/api/v1/oauth/google/callback}
+      DATA_DIR: /app/data
+      TRUST_PROXY: ${TRUST_PROXY:-false}
+      ALLOW_PRIVATE_MAIL_HOSTS: ${ALLOW_PRIVATE_MAIL_HOSTS:-true}
+    volumes: !override
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:5173/api/v1/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]

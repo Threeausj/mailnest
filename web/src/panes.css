@@ -1,0 +1,28 @@
+/* Dividers only appear in the desktop layout. Touch targets stay unchanged on mobile. */
+.pane-divider{display:none}
+.pane-drag-shield{position:fixed;inset:0;z-index:1000;cursor:col-resize;touch-action:none;user-select:none;-webkit-user-select:none;background:transparent}
+@media(min-width:1151px){
+  .mail-app.panes-desktop>.sidebar{width:var(--sidebar-width);min-width:var(--sidebar-width);max-width:var(--sidebar-width);flex:0 0 var(--sidebar-width);border-right:0}
+  .mail-app.panes-desktop>.workspace{min-width:0}
+  .mail-app.panes-desktop .pane-divider{display:block;position:relative;width:var(--pane-divider-width);min-width:var(--pane-divider-width);flex:0 0 var(--pane-divider-width);align-self:stretch;cursor:col-resize;touch-action:none;user-select:none;-webkit-user-select:none;background:#f0f2ed;outline:0}
+  .mail-app.panes-desktop .pane-divider::after{content:'';position:absolute;top:0;bottom:0;left:2px;width:1px;background:#dce3d7;transition:background .12s,width .12s}
+  .mail-app.panes-desktop .pane-divider:hover::after,.mail-app.panes-desktop .pane-divider:focus-visible::after,.mail-app.panes-desktop .pane-divider.is-dragging::after{left:1px;width:3px;background:#729184}
+  .mail-app.panes-desktop .pane-divider:focus-visible{box-shadow:inset 0 0 0 1px #49796c}
+  .mail-app.panes-desktop .pane-divider[data-pane="list"]{position:sticky;top:0;align-self:flex-start;height:calc(100dvh - var(--workspace-heading-height));min-height:80px}
+  .mail-app.panes-desktop .message-list-pane{position:sticky;top:0;align-self:flex-start;width:var(--message-list-width);min-width:var(--message-list-width);max-width:var(--message-list-width);flex:0 0 var(--message-list-width);height:calc(100dvh - var(--workspace-heading-height));min-height:0;border-right:0}
+  .mail-app.panes-desktop.has-mailboxes:not(.has-selection) .message-list-pane{width:var(--message-list-width);min-width:var(--message-list-width);border-right:0}
+  .mail-app.panes-desktop .message-list-scroll{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden}
+  .mail-app.panes-desktop .list-pagination{position:static}
+  .mail-app.panes-desktop .reader-pane,.mail-app.panes-desktop.has-mailboxes:not(.has-selection) .reader-pane{display:flex;min-width:320px;flex:1}
+  .mail-app.panes-desktop .message-row-main{padding-top:8px;padding-bottom:8px}
+  .mail-app.panes-desktop .message-row-top{margin-bottom:2px}
+  .mail-app.panes-desktop .message-row-content{display:block;height:auto}
+  .mail-app.panes-desktop .message-row-subject{max-width:100%;height:20px;line-height:20px}
+  .mail-app.panes-desktop .message-preview{height:16px;line-height:16px;margin-top:1px}
+  .mail-app.panes-desktop .sidebar .brand>span{min-width:0}
+  .mail-app.panes-desktop .sidebar .brand{min-width:0;font-size:clamp(17px,1.4vw,21px);letter-spacing:1px;gap:6px}
+  .mail-app.panes-desktop .sidebar .brand-mark{width:30px;height:30px;flex-shrink:0}
+  .mail-app.panes-desktop .list-toolbar{padding-left:12px;padding-right:12px;gap:8px}
+  .mail-app.panes-desktop .list-filter{gap:12px}
+  .mail-app.panes-desktop .list-count{font-size:10px;white-space:nowrap}
+}

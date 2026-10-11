@@ -1,0 +1,24 @@
+{
+  "name": "mailnest",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24.0.0" },
+  "workspaces": ["server", "web"],
+  "scripts": {
+    "init": "node scripts/init.mjs",
+    "dev": "concurrently -k -n api,web -c blue,green \"npm run dev -w server\" \"npm run dev -w web\"",
+    "build": "npm run build -w web && npm run build -w server",
+    "start": "npm run start -w server",
+    "typecheck": "npm run typecheck -w server && npm run typecheck -w web",
+    "test": "npm run test -w server",
+    "test:e2e": "playwright test",
+    "check:api": "node scripts/check-openapi.mjs",
+    "test:mail": "node scripts/test-mail.mjs"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "@playwright/test": "^1.64.0",
+    "@apidevtools/swagger-parser": "^12.1.0"
+  }
+}

@@ -1,0 +1,90 @@
+/* Each account owns a visible folder group; settings stays outside its scroller. */
+.mail-app .sidebar { overflow: hidden; }
+.sidebar-actions { display: flex; align-items: center; gap: 8px; }
+.sidebar-actions > .compose-button { flex: 1; min-width: 0; }
+.sidebar-actions > .sidebar-close { flex: 0 0 40px; width: 40px; height: 40px; }
+.sidebar .sidebar-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: #d8dfe9 transparent;
+  margin-top: 12px;
+  margin-right: -5px;
+  padding-right: 5px;
+  padding-bottom: 10px;
+}
+.mailbox-folder-group + .mailbox-folder-group { margin-top: 14px; }
+.mailbox-group-heading {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  min-height: 30px;
+  padding: 4px 2px;
+  color: #7d8a9d;
+  text-align: left;
+  font-size: 11px;
+  font-weight: 600;
+}
+.mailbox-group-heading > span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mailbox-group-dot { width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; }
+.mailbox-group-heading .connection-error-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #d59a52;
+  flex-shrink: 0;
+  margin-right: 5px;
+}
+.mailbox-group-heading:hover { color: #344865; }
+.mail-app .sidebar .mailbox-folder { gap: 8px; min-height: 34px; padding: 6px 8px; }
+.mailbox-folder > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mailbox-folder > b { margin-left: auto; flex-shrink: 0; }
+.mailbox-custom-heading {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 34px;
+  padding: 6px 2px;
+  width: 100%;
+  color: #7a8ba4;
+  font-size: 11px;
+  text-align: left;
+}
+.custom-mail-folders .mailbox-folder { padding-left: 17px; }
+.mailbox-folder-container {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  padding: 4px 16px;
+  color: #929eb0;
+  font-size: 10px;
+}
+.mailbox-folder-container > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mailbox-group-folders[hidden], .custom-mail-folders [hidden] { display: none; }
+.sidebar .sidebar-bottom {
+  flex: 0 0 auto;
+  margin-top: 0;
+  padding-top: 5px;
+  padding-bottom: max(7px, env(safe-area-inset-bottom));
+  border-top: 1px solid var(--border);
+}
+.sidebar-bottom > .nav-item { min-height: 40px; }
+.sidebar .mailbox-add-heading { margin-top: 16px; margin-bottom: 0; }
+@media (pointer: coarse) {
+  .mail-app .sidebar .mailbox-folder,
+  .mailbox-group-heading, .mailbox-custom-heading { min-height: 40px; }
+}
+@media (max-width: 767px) {
+  .mail-app .sidebar .mailbox-folder,
+  .mailbox-group-heading, .mailbox-custom-heading { min-height: 40px; }
+}

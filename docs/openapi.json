@@ -1,0 +1,2970 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "MailNest API",
+    "version": "1.0.0",
+    "description": "自托管多邮箱 IMAP / SMTP 收发 API。所有数据按用户隔离，所有 API 响应 Cache-Control: no-store。除健康检查和登录外需鉴权。Cookie 写操作要求 Origin 与 APP_URL 一致；API 令牌使用 Authorization: Bearer。本文档与 docs/api.md 和实现一同维护。"
+  },
+  "servers": [
+    {
+      "url": "/api/v1",
+      "description": "同源版本化 API"
+    }
+  ],
+  "tags": [
+    {
+      "name": "系统"
+    },
+    {
+      "name": "鉴权"
+    },
+    {
+      "name": "邮箱"
+    },
+    {
+      "name": "邮件"
+    },
+    {
+      "name": "同步"
+    },
+    {
+      "name": "Google 授权"
+    },
+    {
+      "name": "提醒"
+    },
+    {
+      "name": "API 令牌"
+    },
+    {
+      "name": "文档"
+    }
+  ],
+  "security": [
+    {
+      "sessionCookie": []
+    },
+    {
+      "bearerAuth": []
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "getHealth",
+        "tags": [
+          "系统"
+        ],
+        "summary": "公开健康检查",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "security": []
+      }
+    },
+    "/auth/login": {
+      "post": {
+        "operationId": "login",
+        "tags": [
+          "鉴权"
+        ],
+        "summary": "管理员登录",
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uri"
+            },
+            "description": "Cookie 会话写操作（包括登录）必须提供与 APP_URL 相同的 Origin；独立 Bearer 令牌请求不要求该头。"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            },
+            "headers": {
+              "Set-Cookie": {
+                "description": "HttpOnly 会话 Cookie；客户端保留后续请求使用。",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          }
+        },
+        "description": "不存在公开注册。首次管理员由环境变量引导。成功后设置 HttpOnly mailnest_session Cookie。HTTPS 使用 Secure；SameSite Cookie，所有响应 no-store。"
+      }
+    },
+    "/auth/me": {
+      "get": {
+        "operationId": "getCurrentUser",
+        "tags": [
+          "鉴权"
+        ],
+        "summary": "读取当前用户",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    },
+    "/auth/logout": {
+      "post": {
+        "operationId": "logout",
+        "tags": [
+          "鉴权"
+        ],
+        "summary": "注销当前会话",
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uri"
+            },
+            "description": "Cookie 会话写操作（包括登录）必须提供与 APP_URL 相同的 Origin；独立 Bearer 令牌请求不要求该头。"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ok"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "description": "撤销当前 Cookie 会话并清除 Cookie。API 令牌需要单独撤销。"
+      }
+    },
+    "/auth/password": {
+      "post": {
+        "operationId": "changePassword",
+        "tags": [
+          "鉴权"
+        ],
+        "summary": "修改登录密码",
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uri"
+            },
+            "description": "Cookie 会话写操作（包括登录）必须提供与 APP_URL 相同的 Origin；独立 Bearer 令牌请求不要求该头。"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ok"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasswordRequest"
+              }
+            }
+          }
+        },
+        "description": "仅浏览器会话；API 令牌不能修改密码。新密码至少 12 字符。成功后撤销该用户所有会话与 API 令牌，须重新登录并重新生成令牌。"
+      }
+    },
+    "/config": {
+      "get": {
+        "operationId": "getConfig",
+        "tags": [
+          "系统"
+        ],
+        "summary": "读取客户端配置",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Config"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    },
+    "/accounts": {
+      "get": {
+        "operationId": "listAccounts",
+        "tags": [
+          "邮箱"
+        ],
+        "summary": "列出当前用户邮箱",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createAccount",
+        "tags": [
+          "邮箱"
+        ],
+        "summary": "接入 IMAP / SMTP 邮箱",
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uri"
+            },
+            "description": "Cookie 会话写操作（包括登录）必须提供与 APP_URL 相同的 Origin；独立 Bearer 令牌请求不要求该头。"
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          },
+          "504": {
+            "$ref": "#/components/responses/Timeout"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AccountCreate"
+              }
+            }
+          }
+        },
+        "description": "先验证 IMAP 与 SMTP，再加密保存凭据。支持 Gmail 应用专用密码，OAuth 请使用 Google 授权端点。TLS / STARTTLS 及证书验证强制启用；默认拒绝内网主机。"
+      }
+    },
+    "/accounts/{id}": {
+      "delete": {
+        "operationId": "deleteAccount",
+        "tags": [
+          "邮箱"
+        ],
+        "summary": "删除本地邮箱连接",
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uri"
+            },
+            "description": "Cookie 会话写操作（包括登录）必须提供与 APP_URL 相同的 Origin；独立 Bearer 令牌请求不要求该头。"
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "当前用户资源 ID。"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ok"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "description": "仅移除当前用户的连接、缓存和相关本地数据，不删除远端邮箱邮件。"
+      },
+      "patch": {
+        "operationId": "updateAccount",
+        "tags": [
+          "邮箱"
+        ],
+        "summary": "修改已连接邮箱的配置",
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uri"
+            },
+            "description": "Cookie 会话写操作（包括登录）必须提供与 APP_URL 相同的 Origin；独立 Bearer 令牌请求不要求该头。"
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "当前用户资源 ID。"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AccountUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          },
+          "200": {
+            "description": "配置已保存",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountUpdateResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          },
+          "504": {
+            "$ref": "#/components/responses/Timeout"
+          }
+        },
+        "description": "仅名称 / 颜色变更不连接远端。连接配置或凭据变化时验证 IMAP 与 SMTP，通过后才原子保存，失败保持原配置。省略或空密码保留旧值；SMTP 两个字段同时 null 恢复共用。email（忽略大小写）、IMAP host（忽略大小写）或 username 变化会清理此账号的本地邮件与目录缓存，并安排重新同步，账号 ID 保持不变，远端邮件不删除；返回 cacheReset:true。其余变更保留缓存。Google OAuth 邮箱只允许名称与颜色，通过 Google 授权流程重新授权。响应不包含任何密码或 OAuth token。"
+      }
+    },
+    "/accounts/{id}/folders": {
+      "get": {
+        "operationId": "listFolders",
+        "tags": [
+          "邮箱"
+        ],
+        "summary": "读取已缓存的邮箱文件夹",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "当前用户资源 ID。"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FoldersResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          },
+          "504": {
+            "$ref": "#/components/responses/Timeout"
+          }
+        },
+        "description": "从所属账号的本地缓存读取，不发起 IMAP 连接；首次同步前返回空数组。通过 POST /accounts/{id}/sync 或 POST /sync 刷新远端目录，等待同步完成后重新读取。"
+      }
+    },
+    "/accounts/{id}/sync": {
+      "post": {
+        "operationId": "syncAccount",
+        "tags": [
+          "同步"
+        ],
+        "summary": "调度单个邮箱同步",
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uri"
+            },
+            "description": "Cookie 会话写操作（包括登录）必须提供与 APP_URL 相同的 Origin；独立 Bearer 令牌请求不要求该头。"
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "当前用户资源 ID。"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ok"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "description": "调度后台同步，响应不表示同步已完成；通过 SSE 或账号状态观察结果。"
+      }
+    },
+    "/sync": {
+      "post": {
+        "operationId": "syncAll",
+        "tags": [
+          "同步"
+        ],
+        "summary": "调度单个或全部邮箱同步",
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uri"
+            },
+            "description": "Cookie 会话写操作（包括登录）必须提供与 APP_URL 相同的 Origin；独立 Bearer 令牌请求不要求该头。"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ok"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SyncRequest"
+              }
+            }
+          }
+        },
+        "description": "省略 accountId 同步当前用户全部账号。返回后同步可能仍在执行。"
+      }
+    },
+    "/messages": {
+      "get": {
+        "operationId": "listMessages",
+        "tags": [
+          "邮件"
+        ],
+        "summary": "搜索和分页读取缓存邮件",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 100
+            },
+            "description": "指定邮箱；省略为所有邮箱。"
+          },
+          {
+            "name": "folder",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "INBOX",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "description": "INBOX / sent / drafts / junk / trash / archive / important 逻辑目录在各邮箱独立解析。也可使用 folders 返回的真实 path；提供 accountId 时优先匹配该账号的真实 path。省略 accountId 时按逻辑目录汇总所属账号，目录容器不可查询。"
+          },
+          {
+            "name": "filter",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "all",
+              "enum": [
+                "all",
+                "unread",
+                "starred"
+              ]
+            },
+            "description": "邮件筛选。"
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "description": "搜索缓存主题、发件人和已加载正文；无完整历史索引。"
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 1,
+              "maximum": 100000
+            },
+            "description": "页码，从 1 开始。"
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 30,
+              "minimum": 1,
+              "maximum": 100
+            },
+            "description": "每页数量，上限 100。"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessagesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "description": "省略 accountId 汇总当前用户所有邮箱。逻辑文件夹按账号映射。每个可选文件夹只缓存最近 SYNC_MESSAGE_LIMIT 封摘要（默认 200），每账号上限 100 个文件夹。搜索主题、发件人和仍缓存的已加载正文；total 针对本地缓存，不是完整远端历史。按日期倒序。"
+      }
+    },
+    "/messages/{id}": {
+      "get": {
+        "operationId": "getMessage",
+        "tags": [
+          "邮件"
+        ],
+        "summary": "读取邮件正文和附件元数据",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "当前用户资源 ID。"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/TooLarge"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          },
+          "504": {
+            "$ref": "#/components/responses/Timeout"
+          }
+        },
+        "description": "按 MIME 结构按需读取正文，纯文本最多 512 KiB、HTML 最多 2 MiB，超限时 bodyTruncated=true。最多读取 16 个正文段、100 个附件元数据；服务商不提供结构时兼容读取完整 MIME，上限 30 MiB。原始 MIME 与附件二进制不持久保存；正文和附件元数据按最近访问缓存（全实例默认 64 MiB / 最后访问后 7 天，可配置 MAIL_CACHE_MAX_MIB / MAIL_CACHE_TTL_DAYS），淘汰后重新读取。读取本接口不会自动标记已读，客户端应显式 PATCH unread=false。"
+      },
+      "patch": {
+        "operationId": "updateMessage",
+        "tags": [
+          "邮件"
+        ],
+        "summary": "设置未读或星标状态",
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uri"
+            },
+            "description": "Cookie 会话写操作（包括登录）必须提供与 APP_URL 相同的 Origin；独立 Bearer 令牌请求不要求该头。"
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "当前用户资源 ID。"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageSummaryResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          },
+          "504": {
+            "$ref": "#/components/responses/Timeout"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MessagePatch"
+              }
+            }
+          }
+        },
+        "description": "先更新远端 IMAP 标记，再更新本地缓存。"
+      }
+    },
+    "/messages/{id}/move": {
+      "post": {
+        "operationId": "moveMessage",
+        "tags": [
+          "邮件"
+        ],
+        "summary": "归档或移入回收站 / 收件箱",
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uri"
+            },
+            "description": "Cookie 会话写操作（包括登录）必须提供与 APP_URL 相同的 Origin；独立 Bearer 令牌请求不要求该头。"
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "当前用户资源 ID。"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ok"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          },
+          "504": {
+            "$ref": "#/components/responses/Timeout"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MoveRequest"
+              }
+            }
+          }
+        },
+        "description": "在远端执行移动并更新缓存。服务器缺少对应逻辑文件夹时返回错误，不永久删除邮件。"
+      }
+    },
+    "/messages/{id}/attachments/{attachmentId}": {
+      "get": {
+        "operationId": "downloadAttachment",
+        "tags": [
+          "邮件"
+        ],
+        "summary": "下载邮件附件",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "当前用户资源 ID。"
+          },
+          {
+            "name": "attachmentId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "当前用户资源 ID。"
+          },
+          {
+            "name": "inline",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "1",
+                "false",
+                "0"
+              ],
+              "default": "false"
+            },
+            "description": "true 或 1 以内嵌图片返回；false / 0 或省略为普通附件下载。仅允许 PNG、JPEG、GIF、WebP、AVIF、BMP。"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "附件原始二进制；默认 application/octet-stream，inline=true/1 时为受支持的图片 MIME。",
+            "headers": {
+              "Content-Disposition": {
+                "description": "默认 attachment；inline=true/1 时为 inline；安全编码 UTF-8 filename*。",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "image/jpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "image/gif": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "image/webp": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "image/avif": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "image/bmp": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/TooLarge"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          },
+          "504": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "415": {
+            "description": "UNSUPPORTED_INLINE_TYPE：该附件类型不允许作为内嵌图片显示。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "description": "从远端按需读取单个附件，二进制不持久保存，单附件上限 30 MiB。默认强制下载；inline=true/1 仅允许安全图片类型，其他 MIME 返回 415 UNSUPPORTED_INLINE_TYPE。仍要求当前用户鉴权与资源归属校验，响应不缓存。"
+      }
+    },
+    "/messages/send": {
+      "post": {
+        "operationId": "sendMessage",
+        "tags": [
+          "邮件"
+        ],
+        "summary": "通过指定账号 SMTP 发信",
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uri"
+            },
+            "description": "Cookie 会话写操作（包括登录）必须提供与 APP_URL 相同的 Origin；独立 Bearer 令牌请求不要求该头。"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SendResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/TooLarge"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          },
+          "504": {
+            "$ref": "#/components/responses/Timeout"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "description": "附件采用 Base64，所有附件解码后的内容总计不超过 20 MiB。",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendRequest"
+              }
+            }
+          }
+        },
+        "description": "SMTP 至少接受一个收件人后返回成功；部分收件人被拒绝时通过 warning 提示，全部拒绝时返回错误。普通 IMAP 账号尽力保存远端已发送副本，失败仍返回 ok=true 和 warning；Gmail 由服务商自动保存避免重复副本。网络中断后 SMTP 可能已接受邮件，接口没有幂等键，重试前确认避免重复投递。"
+      }
+    },
+    "/oauth/google/start": {
+      "get": {
+        "operationId": "startGoogleOAuth",
+        "tags": [
+          "Google 授权"
+        ],
+        "summary": "获取 Gmail 授权 URL",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GoogleStartResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          },
+          "503": {
+            "description": "Google OAuth 尚未配置。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "description": "必须是浏览器会话；短期 state 绑定用户 / 会话，并使用 PKCE。申请 openid email 和 https://mail.google.com/，Refresh Token 加密保存。Google 邮箱授权不代替 MailNest 登录。"
+      }
+    },
+    "/oauth/google/callback": {
+      "get": {
+        "operationId": "googleOAuthCallback",
+        "tags": [
+          "Google 授权"
+        ],
+        "summary": "处理 Google 授权回调",
+        "parameters": [
+          {
+            "name": "code",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "description": "Google 返回的授权码。"
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 20,
+              "maxLength": 200
+            },
+            "description": "必须与发起时的 state 匹配。"
+          },
+          {
+            "name": "error",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "description": "Google 用户拒绝等错误。"
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "重定向回前端首页。",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "/?oauth=success 或 /?oauth=error&reason=..."
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "description": "浏览器跳转回调，要求原始会话与有效 state。成功重定向 /?oauth=success；失败重定向 /?oauth=error&reason=...。调用者不得将授权 code 写入日志。"
+      }
+    },
+    "/events": {
+      "get": {
+        "operationId": "subscribeEvents",
+        "tags": [
+          "同步"
+        ],
+        "summary": "订阅 SSE 邮件和同步事件",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "SSE 长连接，非 JSON 响应。",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                },
+                "example": "event: ready\ndata: {}\n\nevent: mail\ndata: {\"accountId\":\"account-id\",\"count\":1}\n\n"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "description": "当前用户会话订阅；浏览器 EventSource 使用 Cookie。事件 ready:{}、mail:{accountId,count}、sync:{accountId,status}，status 为 syncing / connected / partial / error；partial 表示部分目录失败，可刷新账号查询 error 中的原因。新邮件通知只在后续同步发现新邮件时产生。每用户最多 10 条并发连接，每 25 秒保活；会话过期 / 注销 / 修改密码时关闭连接。连接中断后客户端可重新连接；事件不保证持久重放。"
+      }
+    },
+    "/push/subscriptions": {
+      "post": {
+        "operationId": "createPushSubscription",
+        "tags": [
+          "提醒"
+        ],
+        "summary": "注册 Web Push 订阅",
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uri"
+            },
+            "description": "Cookie 会话写操作（包括登录）必须提供与 APP_URL 相同的 Origin；独立 Bearer 令牌请求不要求该头。"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ok"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PushSubscription"
+              }
+            }
+          }
+        },
+        "description": "由浏览器 PushManager 返回 endpoint / keys。每用户最多 20 个设备，只允许浏览器的 Google / Mozilla / Apple / Windows HTTPS 推送服务。需 HTTPS（localhost 测试例外）、VAPID 配置与用户通知许可。"
+      },
+      "delete": {
+        "operationId": "deletePushSubscription",
+        "tags": [
+          "提醒"
+        ],
+        "summary": "撤销当前用户 Web Push 订阅",
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uri"
+            },
+            "description": "Cookie 会话写操作（包括登录）必须提供与 APP_URL 相同的 Origin；独立 Bearer 令牌请求不要求该头。"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ok"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PushDeleteRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tokens": {
+      "get": {
+        "operationId": "listTokens",
+        "tags": [
+          "API 令牌"
+        ],
+        "summary": "列出 API 令牌元数据",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokensResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "description": "只返回当前用户元数据，不返回令牌内容。管理令牌必须使用浏览器会话。"
+      },
+      "post": {
+        "operationId": "createToken",
+        "tags": [
+          "API 令牌"
+        ],
+        "summary": "创建独立 API 令牌",
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uri"
+            },
+            "description": "Cookie 会话写操作（包括登录）必须提供与 APP_URL 相同的 Origin；独立 Bearer 令牌请求不要求该头。"
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenCreateResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenCreateRequest"
+              }
+            }
+          }
+        },
+        "description": "令牌明文只显示一次，服务器保存摘要。当前 v1 令牌可读取 / 修改本用户邮箱邮件；没有细粒度权限，不能管理令牌、修改密码或发起 Google OAuth。"
+      }
+    },
+    "/tokens/{id}": {
+      "delete": {
+        "operationId": "deleteToken",
+        "tags": [
+          "API 令牌"
+        ],
+        "summary": "立即撤销 API 令牌",
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uri"
+            },
+            "description": "Cookie 会话写操作（包括登录）必须提供与 APP_URL 相同的 Origin；独立 Bearer 令牌请求不要求该头。"
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "当前用户资源 ID。"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ok"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "description": "仅撤销属于当前用户的令牌；不存在的 ID 也返回 ok=true。"
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "operationId": "getOpenApi",
+        "tags": [
+          "文档"
+        ],
+        "summary": "读取 OpenAPI 3.0.3 文档",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "description": "受鉴权保护；来源文件 docs/openapi.json，与实现同步维护。"
+      }
+    },
+    "/docs": {
+      "get": {
+        "operationId": "getApiDocs",
+        "tags": [
+          "文档"
+        ],
+        "summary": "打开交互 API 文档",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "使用本地 Swagger UI 静态资源的 HTML 页面。",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "sessionCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "mailnest_session",
+        "description": "POST /auth/login 返回的 HttpOnly 会话，有效期 7 天，Cookie Path=/api；Cookie 写操作必须提交同 APP_URL 来源的 Origin。修改密码会撤销全部会话及 API 令牌。"
+      },
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "opaque API token",
+        "description": "在已登录会话中 POST /tokens 创建；非 Google Access Token，不能访问会话专属操作。"
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "example": "UNAUTHENTICATED"
+              },
+              "message": {
+                "type": "string",
+                "example": "请先登录。"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ]
+          }
+        },
+        "required": [
+          "error"
+        ]
+      },
+      "Ok": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          }
+        },
+        "required": [
+          "ok"
+        ]
+      },
+      "Health": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ]
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "User": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string",
+            "format": "email"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "name"
+        ]
+      },
+      "UserResponse": {
+        "type": "object",
+        "properties": {
+          "user": {
+            "$ref": "#/components/schemas/User"
+          }
+        },
+        "required": [
+          "user"
+        ]
+      },
+      "Address": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "address": {
+            "type": "string",
+            "description": "发件人地址；无有效头值时可为空字符串。"
+          }
+        },
+        "required": [
+          "name",
+          "address"
+        ]
+      },
+      "MailConnection": {
+        "type": "object",
+        "properties": {
+          "host": {
+            "type": "string",
+            "minLength": 1,
+            "description": "邮件服务器主机名；默认禁止私有、回环和链路本地地址。",
+            "maxLength": 253
+          },
+          "port": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "secure": {
+            "type": "boolean",
+            "description": "true 为连接建立时直接 TLS；false 为必须成功升级的 STARTTLS。始终校验证书。"
+          }
+        },
+        "required": [
+          "host",
+          "port",
+          "secure"
+        ],
+        "additionalProperties": false
+      },
+      "Account": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string",
+            "format": "email"
+          },
+          "color": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "gmail",
+              "imap"
+            ]
+          },
+          "username": {
+            "type": "string"
+          },
+          "smtpUsername": {
+            "type": "string",
+            "nullable": true
+          },
+          "imap": {
+            "$ref": "#/components/schemas/MailConnection"
+          },
+          "smtp": {
+            "$ref": "#/components/schemas/MailConnection"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "connected",
+              "error",
+              "syncing",
+              "partial"
+            ],
+            "description": "partial 表示部分目录同步失败，其他目录仍继续同步；error 表示本轮失败且没有目录同步成功。"
+          },
+          "lastSyncedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "error": {
+            "type": "string",
+            "nullable": true,
+            "description": "经过处理的失败原因；partial 状态包含失败目录提示，不包含凭据或原始协议错误。"
+          },
+          "unread": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "上次 IMAP 同步时完整远端 INBOX 的未读数，可大于本地缓存未读邮件数。"
+          },
+          "folders": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Folder"
+            },
+            "description": "上次同步发现的真实目录缓存，包含空目录和不可选容器。首次同步前为 []；读取不连接远端，手动或周期同步后刷新。"
+          },
+          "authType": {
+            "type": "string",
+            "enum": [
+              "oauth",
+              "password"
+            ],
+            "description": "实际使用 Google OAuth 或密码 / 授权码登录；不返回凭据。"
+          },
+          "hasSeparateSmtpCredentials": {
+            "type": "boolean",
+            "description": "是否单独设置 SMTP 用户名或密码。用于编辑表单，密码不会回填。"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "email",
+          "color",
+          "provider",
+          "username",
+          "imap",
+          "smtp",
+          "status",
+          "lastSyncedAt",
+          "error",
+          "unread",
+          "smtpUsername",
+          "folders",
+          "authType",
+          "hasSeparateSmtpCredentials"
+        ]
+      },
+      "AccountResponse": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "$ref": "#/components/schemas/Account"
+          }
+        },
+        "required": [
+          "account"
+        ]
+      },
+      "AccountsResponse": {
+        "type": "object",
+        "properties": {
+          "accounts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Account"
+            }
+          }
+        },
+        "required": [
+          "accounts"
+        ]
+      },
+      "AccountCreate": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "email": {
+            "type": "string",
+            "format": "email",
+            "maxLength": 254
+          },
+          "color": {
+            "type": "string",
+            "pattern": "^#[a-fA-F0-9]{6}$",
+            "default": "#6d5ce8"
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "gmail",
+              "imap"
+            ]
+          },
+          "username": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 254
+          },
+          "password": {
+            "type": "string",
+            "minLength": 1,
+            "writeOnly": true,
+            "description": "应用专用密码 / 邮箱授权密码，不会返回。",
+            "maxLength": 1024
+          },
+          "imap": {
+            "$ref": "#/components/schemas/MailConnection"
+          },
+          "smtp": {
+            "$ref": "#/components/schemas/MailConnection"
+          },
+          "smtpUsername": {
+            "type": "string",
+            "description": "未填写时使用 IMAP 用户名。",
+            "maxLength": 254
+          },
+          "smtpPassword": {
+            "type": "string",
+            "writeOnly": true,
+            "description": "未填写时使用 IMAP 密码。",
+            "maxLength": 1024
+          }
+        },
+        "required": [
+          "name",
+          "email",
+          "provider",
+          "username",
+          "password",
+          "imap",
+          "smtp"
+        ],
+        "additionalProperties": false
+      },
+      "FoldersResponse": {
+        "type": "object",
+        "properties": {
+          "folders": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Folder"
+            },
+            "description": "上次同步发现的真实目录缓存，包含空目录和不可选容器。首次同步前为 []；读取不连接远端，手动或周期同步后刷新。"
+          }
+        },
+        "required": [
+          "folders"
+        ]
+      },
+      "MessageSummary": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "accountId": {
+            "type": "string"
+          },
+          "folder": {
+            "type": "string"
+          },
+          "from": {
+            "$ref": "#/components/schemas/Address"
+          },
+          "to": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Address"
+            }
+          },
+          "cc": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Address"
+            }
+          },
+          "subject": {
+            "type": "string"
+          },
+          "preview": {
+            "type": "string"
+          },
+          "date": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "unread": {
+            "type": "boolean"
+          },
+          "starred": {
+            "type": "boolean"
+          },
+          "hasAttachments": {
+            "type": "boolean"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "IMAP 完整邮件字节数（可选）。"
+          }
+        },
+        "required": [
+          "id",
+          "accountId",
+          "folder",
+          "from",
+          "to",
+          "cc",
+          "subject",
+          "preview",
+          "date",
+          "unread",
+          "starred",
+          "hasAttachments"
+        ]
+      },
+      "Message": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "accountId": {
+            "type": "string"
+          },
+          "folder": {
+            "type": "string"
+          },
+          "from": {
+            "$ref": "#/components/schemas/Address"
+          },
+          "to": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Address"
+            }
+          },
+          "cc": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Address"
+            }
+          },
+          "subject": {
+            "type": "string"
+          },
+          "preview": {
+            "type": "string"
+          },
+          "date": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "unread": {
+            "type": "boolean"
+          },
+          "starred": {
+            "type": "boolean"
+          },
+          "hasAttachments": {
+            "type": "boolean"
+          },
+          "text": {
+            "type": "string"
+          },
+          "html": {
+            "type": "string",
+            "nullable": true,
+            "description": "邮件 HTML；客户端净化后在不授予同源权限的隔离沙箱中展示，禁止邮件自带的脚本和事件；内置测高脚本仅由随机 CSP nonce 放行，用于正文自然高度展示。正文 CID 图片和 HTTP(S) 外部图片自动加载，外部图片请求使用 no-referrer。"
+          },
+          "messageId": {
+            "type": "string",
+            "nullable": true
+          },
+          "attachments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Attachment"
+            }
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "IMAP 完整邮件字节数（可选）。"
+          },
+          "bodyTruncated": {
+            "type": "boolean",
+            "description": "正文或元数据超过读取上限：纯文本 512 KiB、HTML 2 MiB、16 个正文段、100 个附件元数据。"
+          }
+        },
+        "required": [
+          "id",
+          "accountId",
+          "folder",
+          "from",
+          "to",
+          "cc",
+          "subject",
+          "preview",
+          "date",
+          "unread",
+          "starred",
+          "hasAttachments",
+          "text",
+          "html",
+          "messageId",
+          "attachments",
+          "bodyTruncated"
+        ]
+      },
+      "Attachment": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "filename": {
+            "type": "string"
+          },
+          "contentType": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "IMAP 服务端报告的近似字节数，可能包含传输编码开销；兼容读取完整 MIME 时可为解码后的实际大小。"
+          },
+          "contentId": {
+            "type": "string",
+            "nullable": true,
+            "description": "MIME Content-ID（去除尖括号），用于匹配 HTML 中的 cid: 图片。"
+          },
+          "inline": {
+            "type": "boolean",
+            "description": "邮件声明为内嵌内容或带 Content-ID；普通附件为 false。"
+          }
+        },
+        "required": [
+          "id",
+          "filename",
+          "contentType",
+          "size",
+          "contentId",
+          "inline"
+        ]
+      },
+      "MessageResponse": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "$ref": "#/components/schemas/Message"
+          }
+        },
+        "required": [
+          "message"
+        ]
+      },
+      "MessageSummaryResponse": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "$ref": "#/components/schemas/MessageSummary"
+          }
+        },
+        "required": [
+          "message"
+        ]
+      },
+      "MessagesResponse": {
+        "type": "object",
+        "properties": {
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MessageSummary"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "pageSize": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "messages",
+          "total",
+          "page",
+          "pageSize"
+        ]
+      },
+      "MessagePatch": {
+        "type": "object",
+        "properties": {
+          "unread": {
+            "type": "boolean"
+          },
+          "starred": {
+            "type": "boolean"
+          }
+        },
+        "minProperties": 1,
+        "additionalProperties": false
+      },
+      "MoveRequest": {
+        "type": "object",
+        "properties": {
+          "destination": {
+            "type": "string",
+            "enum": [
+              "trash",
+              "archive",
+              "INBOX"
+            ]
+          }
+        },
+        "required": [
+          "destination"
+        ],
+        "additionalProperties": false
+      },
+      "SendAttachment": {
+        "type": "object",
+        "properties": {
+          "filename": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          },
+          "contentType": {
+            "type": "string",
+            "maxLength": 120,
+            "pattern": "^[\\w.+-]+/[\\w.+-]+$"
+          },
+          "content": {
+            "type": "string",
+            "format": "byte",
+            "description": "标准 Base64 编码的附件内容，不含 data URI 前缀。",
+            "maxLength": 29360128,
+            "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+          }
+        },
+        "required": [
+          "filename",
+          "contentType",
+          "content"
+        ],
+        "additionalProperties": false
+      },
+      "SendRequest": {
+        "type": "object",
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "maxLength": 100
+          },
+          "to": {
+            "type": "string",
+            "minLength": 3,
+            "description": "收件地址，可用逗号分隔多个地址，例如 Alice <alice@example.com>, bob@example.com。",
+            "maxLength": 998,
+            "pattern": "^[^\\r\\n\\u0000]*$"
+          },
+          "cc": {
+            "type": "string",
+            "maxLength": 998,
+            "pattern": "^[^\\r\\n\\u0000]*$"
+          },
+          "bcc": {
+            "type": "string",
+            "maxLength": 998,
+            "pattern": "^[^\\r\\n\\u0000]*$"
+          },
+          "subject": {
+            "type": "string",
+            "maxLength": 998,
+            "pattern": "^[^\\r\\n\\u0000]*$"
+          },
+          "text": {
+            "type": "string",
+            "maxLength": 2097152
+          },
+          "inReplyTo": {
+            "type": "string",
+            "description": "被回复邮件的 RFC Message-ID。",
+            "maxLength": 998,
+            "pattern": "^[^\\r\\n\\u0000]*$"
+          },
+          "references": {
+            "type": "string",
+            "description": "RFC References 头值。",
+            "maxLength": 998,
+            "pattern": "^[^\\r\\n\\u0000]*$"
+          },
+          "attachments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SendAttachment"
+            },
+            "maxItems": 20
+          }
+        },
+        "required": [
+          "accountId",
+          "to",
+          "subject",
+          "text"
+        ],
+        "additionalProperties": false
+      },
+      "SendResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "messageId": {
+            "type": "string"
+          },
+          "warning": {
+            "type": "string",
+            "description": "SMTP 已投递给至少一个收件人，但部分收件人被拒绝或远端已发送副本保存失败。不要据此对所有收件人重复发送。"
+          }
+        },
+        "required": [
+          "ok",
+          "messageId"
+        ]
+      },
+      "LoginRequest": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string",
+            "format": "email",
+            "maxLength": 254
+          },
+          "password": {
+            "type": "string",
+            "writeOnly": true,
+            "maxLength": 1024
+          }
+        },
+        "required": [
+          "email",
+          "password"
+        ],
+        "additionalProperties": false
+      },
+      "PasswordRequest": {
+        "type": "object",
+        "properties": {
+          "currentPassword": {
+            "type": "string",
+            "writeOnly": true,
+            "maxLength": 1024
+          },
+          "newPassword": {
+            "type": "string",
+            "minLength": 12,
+            "writeOnly": true,
+            "maxLength": 1024
+          }
+        },
+        "required": [
+          "currentPassword",
+          "newPassword"
+        ],
+        "additionalProperties": false
+      },
+      "Config": {
+        "type": "object",
+        "properties": {
+          "googleConfigured": {
+            "type": "boolean"
+          },
+          "pushPublicKey": {
+            "type": "string",
+            "nullable": true
+          },
+          "pollingInterval": {
+            "type": "integer",
+            "minimum": 30,
+            "description": "后台同步间隔，单位秒。",
+            "maximum": 86400
+          }
+        },
+        "required": [
+          "googleConfigured",
+          "pushPublicKey",
+          "pollingInterval"
+        ]
+      },
+      "SyncRequest": {
+        "type": "object",
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "maxLength": 100
+          }
+        },
+        "additionalProperties": false
+      },
+      "GoogleStartResponse": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "format": "uri"
+          }
+        },
+        "required": [
+          "url"
+        ]
+      },
+      "PushSubscription": {
+        "type": "object",
+        "properties": {
+          "endpoint": {
+            "type": "string",
+            "format": "uri",
+            "maxLength": 2048
+          },
+          "keys": {
+            "type": "object",
+            "properties": {
+              "p256dh": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{87,90}={0,2}$"
+              },
+              "auth": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{22}={0,2}$"
+              }
+            },
+            "required": [
+              "p256dh",
+              "auth"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "endpoint",
+          "keys"
+        ],
+        "additionalProperties": false
+      },
+      "PushDeleteRequest": {
+        "type": "object",
+        "properties": {
+          "endpoint": {
+            "type": "string",
+            "format": "uri",
+            "maxLength": 2048
+          }
+        },
+        "required": [
+          "endpoint"
+        ],
+        "additionalProperties": false
+      },
+      "ApiToken": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "lastUsedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "createdAt",
+          "lastUsedAt"
+        ]
+      },
+      "TokensResponse": {
+        "type": "object",
+        "properties": {
+          "tokens": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApiToken"
+            }
+          }
+        },
+        "required": [
+          "tokens"
+        ]
+      },
+      "TokenCreateRequest": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80,
+            "description": "令牌名称，去除首尾空白；每用户最多 20 个令牌。"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "TokenCreateResponse": {
+        "type": "object",
+        "properties": {
+          "token": {
+            "type": "string",
+            "description": "只在此响应返回一次；请保存，之后无法再次查看。"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "id"
+        ]
+      },
+      "MailEvent": {
+        "type": "object",
+        "properties": {
+          "accountId": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "accountId",
+          "count"
+        ]
+      },
+      "SyncEvent": {
+        "type": "object",
+        "properties": {
+          "accountId": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "connected",
+              "error",
+              "syncing",
+              "partial"
+            ]
+          }
+        },
+        "required": [
+          "accountId",
+          "status"
+        ]
+      },
+      "Folder": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "远端真实目录路径；单个账号列表使用此值查询。"
+          },
+          "name": {
+            "type": "string"
+          },
+          "specialUse": {
+            "type": "string",
+            "nullable": true,
+            "description": "IMAP Special-Use 标记；服务端未提供时为 null。"
+          },
+          "selectable": {
+            "type": "boolean",
+            "description": "false 为不可选目录容器；QQ 无 UID 信息的空虚拟父目录也标为 false。"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "inbox",
+              "sent",
+              "drafts",
+              "junk",
+              "trash",
+              "archive",
+              "important",
+              "custom"
+            ],
+            "description": "由 Special-Use 或常见目录名称归一化，用于构建独立及统一目录列表。"
+          }
+        },
+        "required": [
+          "path",
+          "name",
+          "specialUse",
+          "selectable",
+          "kind"
+        ]
+      },
+      "AccountUpdate": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "email": {
+            "type": "string",
+            "format": "email",
+            "maxLength": 254
+          },
+          "color": {
+            "type": "string",
+            "pattern": "^#[a-fA-F0-9]{6}$"
+          },
+          "username": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 254
+          },
+          "password": {
+            "type": "string",
+            "maxLength": 1024,
+            "writeOnly": true,
+            "description": "留空字符串或省略则保留原密码；非空则替换。"
+          },
+          "imap": {
+            "$ref": "#/components/schemas/MailConnection"
+          },
+          "smtp": {
+            "$ref": "#/components/schemas/MailConnection"
+          },
+          "smtpUsername": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 254,
+            "nullable": true,
+            "description": "省略保留现有设置。与 smtpPassword 同时为 null 时取消独立 SMTP 凭据，复用 IMAP 用户名与密码。"
+          },
+          "smtpPassword": {
+            "type": "string",
+            "maxLength": 1024,
+            "writeOnly": true,
+            "nullable": true,
+            "description": "省略或空字符串保留原独立 SMTP 密码；首次启用独立 SMTP 时未提供非空值则采用本次更新后的 IMAP 密码。非空则替换；与 smtpUsername 同时为 null 时取消独立 SMTP 凭据。"
+          }
+        },
+        "minProperties": 1,
+        "additionalProperties": false,
+        "description": "部分更新，provider 不可修改。Google OAuth 邮箱仅允许 name/color。imap/smtp 若传入须包含完整 host、port、secure。"
+      },
+      "AccountUpdateResponse": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "$ref": "#/components/schemas/Account"
+          },
+          "cacheReset": {
+            "type": "boolean",
+            "description": "身份变化时为 true，旧本地缓存已清理并安排重新同步；客户端应取消旧邮件与目录选择。"
+          }
+        },
+        "required": [
+          "account",
+          "cacheReset"
+        ]
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "请求格式 / 参数无效、邮件服务商连接或收发失败、私有主机被阻止、邮箱或文件夹数量超限。错误 code 区分具体原因。",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "登录或 API 令牌无效 / 过期，或密码错误。",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "Cookie 请求来源与 APP_URL 不一致，或当前操作要求浏览器会话。",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "资源不存在或不属于当前用户。",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "TooLarge": {
+        "description": "请求体超 32 MiB、解码后的附件总量超 20 MiB，或在线阅读的完整邮件超 30 MiB。",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "RateLimited": {
+        "description": "登录尝试过多（最多 5 次失败后等 10 分钟）或同时打开的 SSE 连接超过每用户 10 条上限。",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Timeout": {
+        "description": "远端邮箱操作超过 90 秒。",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Conflict": {
+        "description": "邮箱重复连接、远端 UID 有效性发生变化需重新同步，或推送 endpoint 属于其他用户。",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Unavailable": {
+        "description": "服务正在关闭，或 Google / Web Push 尚未配置。",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "ServerError": {
+        "description": "服务内部错误。",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
+    }
+  }
+}
