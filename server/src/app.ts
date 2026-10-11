@@ -10,7 +10,7 @@ import type { ServerResponse } from 'node:http';
 import webPush from 'web-push';
 import { type Config, loadConfig, repoRoot, frontendBuilt } from './config.js';
 import { Store, type UserRow, type AccountRow, type MessageRow, accountDto, summaryDto, userDto } from './db.js';
-import { ApiError, hashPassword, verifyPassword, hashToken, randomToken, resolveMailHost, safeMailError } from './security.js';
+import { ApiError, hashPassword, verifyPassword, hashToken, randomToken, safeMailError } from './security.js';
 import { MailService, findFolder, googleToken, googleIdentity } from './mail.js';
 
 interface Auth {user:UserRow;kind:'session'|'token';sessionId?:string;expiresAt?:number}
@@ -204,12 +204,14 @@ export async function buildApp(config:Config=loadConfig()) {
   app.post(`${prefix}/push/subscriptions`,async request=>{
     const input=pushSchema.parse(request.body);const url=new URL(input.endpoint);
     if(url.protocol!=='https:'||url.username||url.password||url.port||( !trustedPushHosts.some(host=>url.hostname===host||url.hostname.endsWith(`.${host}`))))throw new ApiError(400,'INVALID_PUSH_ENDPOINT','仅支持浏览器提供的 HTTPS 推送服务地址。');
-    await resolveMailHost(url.hostname,false);
     if(!config.vapidPublicKey||!config.vapidPrivateKey)throw new ApiError(503,'PUSH_NOT_CONFIGURED','管理员尚未配置推送服务。');
-    const userId=request.auth!.user.id;const count=store.db.prepare('SELECT COUNT(*) AS n FROM push_subscriptions WHERE user_id=?').get(userId) as {n:number};if(count.n>=20)throw new ApiError(400,'PUSH_LIMIT','每位用户最多 20 个推送设备。');
+    const userId=request.auth!.user.id;
     const existing=store.db.prepare('SELECT user_id FROM push_subscriptions WHERE endpoint=?').get(input.endpoint) as {user_id:string}|undefined;
     if(existing&&existing.user_id!==userId)throw new ApiError(409,'PUSH_ENDPOINT_EXISTS','此推送地址已被使用。');
-    store.db.prepare('INSERT INTO push_subscriptions(endpoint,user_id,subscription) VALUES(?,?,?) ON CONFLICT(endpoint) DO UPDATE SET subscription=excluded.subscription').run(input.endpoint,userId,JSON.stringify(input));return{ok:true};
+    if(!existing){const count=store.db.prepare('SELECT COUNT(*) AS n FROM push_subscriptions WHERE user_id=?').get(userId) as {n:number};if(count.n>=20)throw new ApiError(400,'PUSH_LIMIT','每位用户最多 20 个推送设备。');}
+    const saved=store.db.prepare('INSERT INTO push_subscriptions(endpoint,user_id,subscription) VALUES(?,?,?) ON CONFLICT(endpoint) DO UPDATE SET subscription=excluded.subscription WHERE push_subscriptions.user_id=excluded.user_id').run(input.endpoint,userId,JSON.stringify(input));
+    if(!saved.changes)throw new ApiError(409,'PUSH_ENDPOINT_EXISTS','此推送地址已被使用。');
+    return{ok:true};
   });
   app.delete(`${prefix}/push/subscriptions`,async request=>{const input=z.object({endpoint:z.string().max(2048)}).strict().parse(request.body);store.db.prepare('DELETE FROM push_subscriptions WHERE endpoint=? AND user_id=?').run(input.endpoint,request.auth!.user.id);return{ok:true};});
   app.get(`${prefix}/tokens`,async request=>{sessionOnly(request);return{tokens:store.db.prepare('SELECT id,name,created_at AS createdAt,last_used_at AS lastUsedAt FROM api_tokens WHERE user_id=? ORDER BY created_at DESC').all(request.auth!.user.id)};});

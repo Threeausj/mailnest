@@ -61,14 +61,12 @@
 .message-metadata-side>.icon-button{grid-column:2;grid-row:1 / span 2;align-self:center;width:32px;height:32px;min-width:32px;color:#a1ad92}
 .message-detail>.message-body{padding-top:0}
 
-@media(min-width:1151px){
-  .mail-app.panes-desktop .workspace-header{grid-template-columns:var(--message-list-width) var(--pane-divider-width) minmax(0,1fr)}
-  .panes-desktop .workspace-header .workspace-heading{grid-column:1;padding:0 12px}
-  .panes-desktop .header-reading{grid-column:3}
-  .mail-app.panes-desktop>.sidebar{padding-top:10px}
-  .panes-desktop .sidebar-brand{min-height:32px;margin-bottom:10px}
-}
-@media(min-width:768px) and (max-width:1150px){
+.mail-app.panes-desktop .workspace-header{grid-template-columns:var(--message-list-width) var(--pane-divider-width) minmax(0,1fr)}
+.panes-desktop .workspace-header .workspace-heading{grid-column:1;padding:0 12px}
+.panes-desktop .header-reading{grid-column:3}
+.mail-app.panes-desktop>.sidebar{padding-top:10px}
+.panes-desktop .sidebar-brand{min-height:32px;margin-bottom:10px}
+@media(min-width:768px) and (max-width:1023px){
   .workspace-header .workspace-heading h1>span{display:none}
 }
 @media(pointer:coarse){

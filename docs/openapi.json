@@ -1487,7 +1487,7 @@
             }
           }
         },
-        "description": "由浏览器 PushManager 返回 endpoint / keys。每用户最多 20 个设备，只允许浏览器的 Google / Mozilla / Apple / Windows HTTPS 推送服务。需 HTTPS（localhost 测试例外）、VAPID 配置与用户通知许可。"
+        "description": "由浏览器 PushManager 返回 endpoint / keys。每用户最多 20 个设备，本人已有 endpoint 可重复登记并更新密钥，达到上限仍可更新，不能覆盖其他用户的订阅。只允许浏览器的 Google / Mozilla / Apple / Windows HTTPS 推送服务，保留订阅格式和 TLS 证书校验；注册时不做 DNS / IP 地址拦截，实际连接交给运行环境或 TUN，推送无需 ALLOW_PRIVATE_MAIL_HOSTS。需 HTTPS（localhost 测试例外）、VAPID 配置与用户通知许可。"
       },
       "delete": {
         "operationId": "deletePushSubscription",

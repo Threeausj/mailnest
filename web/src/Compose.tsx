@@ -1,11 +1,11 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { ChevronDown, File, Paperclip, Send, X } from 'lucide-react';
 import { api, errorText } from './api';
 import { ErrorNotice, fileSize, Modal, Spinner } from './components';
 import { bytesToAttachment, forwardSubject, forwardText, loadForwardAttachment, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENT_COUNT } from './composeForward';
 import type { Account, DraftAttachment, Message } from './types';
 
-export default function Compose({ accounts, defaultAccount, reply, forward, onClose, onSent }: { accounts: Account[]; defaultAccount: string; reply: Message | null; forward: Message | null; onClose: () => void; onSent: (warning?: string) => void }) {
+export default function Compose({ accounts, defaultAccount, reply, forward, onClose, onSent, onRegisterClose }: { accounts: Account[]; defaultAccount: string; reply: Message | null; forward: Message | null; onClose: () => void; onSent: (warning?: string) => void; onRegisterClose?: (close: (() => boolean) | null) => void }) {
   const [initial] = useState(() => ({
     accountId: (forward || reply)?.accountId || defaultAccount || accounts[0]?.id || '',
     to: forward ? '' : reply?.from.address || '',
@@ -39,11 +39,13 @@ export default function Compose({ accounts, defaultAccount, reply, forward, onCl
   const totalBytes = [...attachments, ...sourceAttachments].reduce((sum, item) => sum + item.size, 0);
   const limitError = attachmentCount > MAX_ATTACHMENT_COUNT ? '一封邮件最多添加 20 个附件，请移除部分原邮件附件。' : totalBytes > MAX_ATTACHMENT_BYTES ? '附件总大小不能超过 20 MB，请移除部分原邮件附件。' : '';
   function close() {
-    if (request.current || attachmentRead.current) return;
+    if (request.current || attachmentRead.current) return false;
     const changed = accountId !== initial.accountId || to !== initial.to || cc.trim() || bcc.trim() || subject !== initial.subject || text !== initial.text || attachments.length || sourceAttachments.length !== initial.sourceAttachments.length;
-    if (changed && !window.confirm('关闭后，此封邮件的草稿将被丢弃。确定关闭？')) return;
+    if (changed && !window.confirm('关闭后，此封邮件的草稿将被丢弃。确定关闭？')) return false;
     onClose();
+    return true;
   }
+  useLayoutEffect(() => { onRegisterClose?.(close); return () => onRegisterClose?.(null); });
   async function attach(files: FileList | null) {
     if (!files?.length || attachmentRead.current || request.current) return;
     setError('');

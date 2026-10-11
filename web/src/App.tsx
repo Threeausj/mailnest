@@ -11,6 +11,7 @@ import MessageHeader from './MessageHeader';
 import MailNavigation, { folderInfo, inboxFolder } from './MailNavigation';
 import { PwaInstallButton, PwaInstallGuide, usePwaInstall } from './PwaInstall';
 import { PaneDivider, PaneDragShield, usePaneSizes } from './PaneResize';
+import { useAppHistory, withoutOverlay, type AppHistoryView } from './useAppHistory';
 import type { Account, Config, Message, MessageSummary, User } from './types';
 
 function EmptyIllustration() {
@@ -50,6 +51,10 @@ export default function App() {
   const [drawer, setDrawer] = useState(false); const [settings, setSettings] = useState(false); const [addAccount, setAddAccount] = useState(false); const [compose, setCompose] = useState(false); const [reply, setReply] = useState<Message | null>(null);
   const [forward, setForward] = useState<Message | null>(null);
   const [editingAccount, setEditingAccount] = useState<Account | null>(null);
+  const composeClose = useRef<(() => boolean) | null>(null);
+  const registerComposeClose = useCallback((close: (() => boolean) | null) => { composeClose.current = close; }, []);
+  const accountFormClose = useRef<(() => boolean) | null>(null);
+  const registerAccountFormClose = useCallback((close: (() => boolean) | null) => { accountFormClose.current = close; }, []);
   const [toast, setToast] = useState(''); const [online, setOnline] = useState(navigator.onLine);
   const pwaInstall = usePwaInstall();
   const panes = usePaneSizes();
@@ -67,6 +72,45 @@ export default function App() {
   const title = filter === 'starred' ? '星标邮件' : filter === 'unread' ? '未读邮件' : activeFolder.label;
   const visibleAccounts = accountId ? accounts.filter((account) => account.id === accountId) : accounts;
   const erroredAccounts = visibleAccounts.filter((account) => account.status === 'error' || account.status === 'partial');
+
+  const historyView: AppHistoryView = {
+    accountId,folder,filter,page,selectedId,
+    overlay:compose ? 'compose' : editingAccount ? 'edit-account' : addAccount ? 'add-account' : settings ? 'settings' : drawer ? 'navigation' : pwaInstall.guideOpen ? 'install' : '',
+    editingAccountId:editingAccount?.id || '',composeKind:compose && forward ? 'forward' : compose && reply ? 'reply' : 'new',composeMessageId:compose ? (forward || reply)?.id || '' : '',
+  };
+  useAppHistory({
+    owner:user?.id || '',view:historyView,
+    onRestore:(view) => {
+      let restored = view;
+      const editing = view.overlay === 'edit-account' ? accounts.find(account => account.id === view.editingAccountId) : undefined;
+      if (view.overlay === 'edit-account' && !editing) restored = {...withoutOverlay(view),overlay:'settings'};
+      if (view.overlay === 'compose' && view.composeKind !== 'new' && (view.composeKind === 'reply' ? reply?.id : forward?.id) !== view.composeMessageId) restored = withoutOverlay(view);
+      // Installation prompts cannot be replayed by browser Forward.
+      if (view.overlay === 'install') restored = withoutOverlay(view);
+      if (!selectedId && restored.selectedId) overviewScroll.current = workspaceScroll.current?.scrollTop || 0;
+      if (accountId !== restored.accountId || folder !== restored.folder || filter !== restored.filter || page !== restored.page) { setQuery(''); setSearch(''); }
+      setAccountId(restored.accountId); setFolder(restored.folder); setFilter(restored.filter); setPage(restored.page); setSelectedId(restored.selectedId);
+      setDrawer(restored.overlay === 'navigation'); setSettings(restored.overlay === 'settings'); setAddAccount(restored.overlay === 'add-account');
+      setEditingAccount(restored.overlay === 'edit-account' ? editing || null : null);
+      setCompose(restored.overlay === 'compose');
+      if (restored.overlay === 'compose') { if (restored.composeKind !== 'reply') setReply(null); if (restored.composeKind !== 'forward') setForward(null); }
+      if (pwaInstall.guideOpen && restored.overlay !== 'install') pwaInstall.closeGuide();
+      return restored;
+    },
+    onCloseOverlay:(view) => {
+      switch (view.overlay) {
+        case 'compose': return composeClose.current?.() ? withoutOverlay(view) : null;
+        case 'edit-account': return accountFormClose.current?.() ? {...withoutOverlay(view),overlay:'settings'} : null;
+        case 'add-account': return accountFormClose.current?.() ? withoutOverlay(view) : null;
+        case 'settings': setSettings(false); if (pwaInstall.guideOpen) pwaInstall.closeGuide(); break;
+        case 'navigation': setDrawer(false); break;
+        case 'install': pwaInstall.closeGuide(); break;
+        default: return null;
+      }
+      return withoutOverlay(view);
+    },
+    onRootBack:() => setToast('再次返回退出应用'),
+  });
 
   useLayoutEffect(() => {
     if (previousView.current !== viewKey) {
@@ -91,7 +135,7 @@ export default function App() {
   }, [refresh]);
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    if (params.get('oauth')) { setToast(params.get('oauth') === 'success' ? 'Google 邮箱连接成功。' : `Google 授权未完成：${params.get('reason') || '请重试'}`); window.history.replaceState({}, '', window.location.pathname); }
+    if (params.get('oauth')) { setToast(params.get('oauth') === 'success' ? 'Google 邮箱连接成功。' : `Google 授权未完成：${params.get('reason') || '请重试'}`); window.history.replaceState(window.history.state, '', window.location.pathname); }
   }, []);
   useEffect(() => {
     const nextSearch = query.trim();
@@ -266,13 +310,13 @@ export default function App() {
       <nav className="mobile-bottom-nav" aria-label="快捷导航"><button className={folder === activeInbox && filter === 'all' ? 'active' : ''} onClick={() => changeView(activeInbox, 'all')}><Inbox size={20} /><span>收件箱</span>{unread > 0 && <i />}</button><button className={filter === 'starred' ? 'active' : ''} onClick={() => changeView(activeInbox, 'starred')}><Star size={20} /><span>星标</span></button><button className="mobile-compose" aria-label="写邮件" onClick={() => accounts.length ? openCompose() : setAddAccount(true)}><PenLine size={22} /></button><button onClick={() => setDrawer(true)}><Mail size={20} /><span>邮箱</span></button><button onClick={() => setSettings(true)}><SettingsIcon size={20} /><span>设置</span></button></nav>
     </div>
     {settings && <Settings accounts={accounts} user={user} config={config} onClose={() => setSettings(false)} onAddAccount={() => { setSettings(false); setAddAccount(true); }} onEditAccount={(account) => { setSettings(false); setEditingAccount(account); }} onRefresh={refresh} onToast={setToast} onLogout={() => void logout()} install={pwaInstall} />}
-    {addAccount && <AccountForm config={config} onClose={() => setAddAccount(false)} onSaved={(account) => { setAccounts((previous) => [...previous, account]); setAddAccount(false); setToast('邮箱连接成功，正在同步邮件。'); refresh(); }} />}
-    {editingAccount && <AccountForm key={editingAccount.id} account={editingAccount} config={config} onClose={() => { setEditingAccount(null); setSettings(true); }} onSaved={(account, cacheReset) => {
+    {addAccount && <AccountForm config={config} onRegisterClose={registerAccountFormClose} onClose={() => setAddAccount(false)} onSaved={(account) => { setAccounts((previous) => [...previous, account]); setAddAccount(false); setToast('邮箱连接成功，正在同步邮件。'); refresh(); }} />}
+    {editingAccount && <AccountForm key={editingAccount.id} account={editingAccount} config={config} onRegisterClose={registerAccountFormClose} onClose={() => { setEditingAccount(null); setSettings(true); }} onSaved={(account, cacheReset) => {
       setAccounts((previous) => previous.map((item) => item.id === account.id ? account : item));
       if (cacheReset && (!accountId || accountId === account.id)) { changeView('INBOX', 'all', accountId); setMessage(null); }
       setEditingAccount(null); setSettings(true); setToast(cacheReset ? '邮箱配置已保存，正在重新同步邮件。' : '邮箱配置已保存。'); refresh();
     }} />}
-    {compose && <Compose accounts={accounts} defaultAccount={accountId} reply={reply} forward={forward} onClose={() => setCompose(false)} onSent={(warning) => { setCompose(false); setToast(warning ? `邮件已发送。${warning}` : '邮件已成功发送。'); refresh(); }} />}
+    {compose && <Compose accounts={accounts} defaultAccount={accountId} reply={reply} forward={forward} onRegisterClose={registerComposeClose} onClose={() => setCompose(false)} onSent={(warning) => { setCompose(false); setToast(warning ? `邮件已发送。${warning}` : '邮件已成功发送。'); refresh(); }} />}
     {!settings && !addAccount && !editingAccount && !compose && <PwaInstallGuide install={pwaInstall} />}
     {toast && <Toast message={toast} onClose={closeToast} />}
     <PaneDragShield controller={panes} />

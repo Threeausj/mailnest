@@ -1,6 +1,7 @@
-# Current NAS: keep the existing LAN origin and mihomo DNS/Fake-IP routing.
+# Current NAS: keep mihomo DNS/Fake-IP routing and the data bind mount.
 # Copy to compose.override.yml in /volume2/docker/mailnest after setting .env.
-# This HTTP LAN profile needs Docker Compose >= 2.24.4 for !reset / !override.
+# Supports LAN HTTP or HTTPS through an existing reverse proxy.
+# Needs Docker Compose >= 2.24.4 for !reset / !override.
 services:
   mailnest:
     build:
@@ -10,8 +11,8 @@ services:
     dns:
       - 127.0.0.1
     environment:
-      # Run the compiled app; the existing LAN HTTP origin needs this mode.
-      NODE_ENV: development
+      # Set NODE_ENV=production and APP_URL=https://... behind an HTTPS proxy.
+      NODE_ENV: ${NODE_ENV:-development}
       HOST: 0.0.0.0
       PORT: 5173
       APP_URL: ${APP_URL:-http://192.168.91.85:5173}

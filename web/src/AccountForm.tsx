@@ -1,12 +1,13 @@
-import { useState } from 'react';
+import { useLayoutEffect, useState } from 'react';
 import { ArrowRight, Check, ExternalLink, Globe2, Mail, RefreshCw, ShieldCheck } from 'lucide-react';
 import { api, errorText, patch, post } from './api';
 import { ErrorNotice, Modal, Spinner } from './components';
 import type { Account, Config } from './types';
 
-export default function AccountForm({ account: existing, config, onClose, onSaved }: {
+export default function AccountForm({ account: existing, config, onClose, onSaved, onRegisterClose }: {
   account?: Account; config: Config | null; onClose: () => void;
   onSaved: (account: Account, cacheReset?: boolean) => void;
+  onRegisterClose?: (close: (() => boolean) | null) => void;
 }) {
   const editing = Boolean(existing);
   const oauthConnected = existing?.authType === 'oauth';
@@ -73,7 +74,9 @@ export default function AccountForm({ account: existing, config, onClose, onSave
     try { const { url } = await api<{ url: string }>('/oauth/google/start'); window.location.assign(url); }
     catch (error) { setError(errorText(error)); setBusy(false); }
   }
-  return <Modal title={editing ? '编辑邮箱' : '连接一个邮箱'} subtitle={editing ? oauthConnected ? '更新名称与标记颜色，或重新授权 Google。' : '更新邮箱配置，密码留空则保持原有凭据。' : '让每一封邮件，都有自己的位置。'} onClose={() => { if (!busy) onClose(); }} wide>
+  function close() { if (busy) return false; onClose(); return true; }
+  useLayoutEffect(() => { onRegisterClose?.(close); return () => onRegisterClose?.(null); });
+  return <Modal title={editing ? '编辑邮箱' : '连接一个邮箱'} subtitle={editing ? oauthConnected ? '更新名称与标记颜色，或重新授权 Google。' : '更新邮箱配置，密码留空则保持原有凭据。' : '让每一封邮件，都有自己的位置。'} onClose={close} wide>
     {!editing && <div className="provider-tabs" role="tablist" aria-label="邮箱类型"><button type="button" role="tab" aria-selected={provider === 'gmail'} className={provider === 'gmail' ? 'selected' : ''} disabled={busy} onClick={() => setProvider('gmail')}><span className="google-letter">G</span> Google / Gmail</button><button type="button" role="tab" aria-selected={provider === 'imap'} className={provider === 'imap' ? 'selected' : ''} disabled={busy} onClick={() => setProvider('imap')}><Globe2 size={18} /> IMAP / SMTP</button></div>}
     <form onSubmit={submit} className={`account-form ${editing ? 'account-edit-form' : ''}`}><fieldset className="account-fields" disabled={busy}>
       {provider === 'gmail' && !editing && <><div className="oauth-option"><div><strong>使用 Google 安全授权</strong><p>{config?.googleConfigured ? '通过 Google 登录授权，无需保存邮箱密码。' : '配置 Google OAuth 后，即可使用一键授权。'}</p></div><button type="button" className="button secondary" onClick={oauth} disabled={busy || !config?.googleConfigured}>连接 Google <ArrowRight size={16} /></button></div><div className="divider-label"><span>或使用应用专用密码</span></div><div className="hint-panel"><ShieldCheck size={19} /><div>在 Google 账户中开启两步验证，然后创建应用专用密码。<a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener noreferrer">获取应用专用密码 <ExternalLink size={12} /></a></div></div></>}

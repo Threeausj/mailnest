@@ -158,7 +158,9 @@ Google OAuth 邮箱只允许修改 `name` / `color`，修改地址、服务器�
 
 `GET /events` 返回 `text/event-stream`，使用浏览器 EventSource Cookie 连接。事件 `ready` 为 `{}`，`mail` 为 `{accountId,count}`，`sync` 为 `{accountId,status}`，status 为 `syncing` / `connected` / `partial` / `error`；收到 `partial` 后可刷新账号获取具体目录原因。每用户最多 10 个连接，每 25 秒保活；会话过期、注销或修改密码时关闭。连接断开后重新连接并刷新列表；当前没有持久事件重放承诺。同步 API 的 `{ok:true}` 表示已调度，不能据此认定已同步完成。
 
-`POST /push/subscriptions` 传入浏览器 PushManager 的 `{endpoint,keys:{p256dh,auth}}`；`DELETE` 传入 `{endpoint}`。每用户最多 20 个推送设备，仅接受浏览器提供的 Google / Mozilla / Apple / Windows HTTPS 推送服务地址。需要 VAPID 公私钥、用户主动授权、HTTPS 和浏览器支持。新邮件提醒由后续同步发现新邮件触发，首次同步旧邮件不提醒。Push 送达及显示依赖浏览器和系统。日志不应保存邮件秘密或推送授权信息。
+`POST /push/subscriptions` 传入浏览器 PushManager 的 `{endpoint,keys:{p256dh,auth}}`；`DELETE` 传入 `{endpoint}`。每用户最多 20 个推送设备，同一本人的 endpoint 重复提交会更新订阅密钥，达到上限时仍可更新，不能覆盖其他人的 endpoint。仅接受浏览器提供的 Google / Mozilla / Apple / Windows HTTPS 推送服务地址，保留订阅格式与 TLS 证书校验；注册时不做 DNS / IP 地址拦截，实际连接由运行环境或 TUN 代理处理，无需为推送设置 `ALLOW_PRIVATE_MAIL_HOSTS`。
+
+需要 VAPID 公私钥、用户主动授权、HTTPS 和浏览器支持。设置页会将浏览器已有订阅重新登记，服务端保存成功后才显示已开启；失败可直接重试，不会仅凭浏览器存在订阅就显示成功。新邮件提醒由后续同步发现新邮件触发，首次同步旧邮件不提醒。Push 送达及显示依赖浏览器和系统。日志不应保存邮件秘密或推送授权信息。
 
 ## 文档维护
 

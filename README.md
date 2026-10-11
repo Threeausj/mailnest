@@ -2,7 +2,7 @@
 
 自托管邮件收发系统，使用 React / TypeScript 前端、Fastify / TypeScript 后端和 SQLite。可接入 Gmail OAuth 2.0 或 IMAP / SMTP 邮箱，统一查看多个邮箱，也可按账号单独管理。支持手机、平板和桌面布局、PWA 安装、邮件提醒和独立 API 令牌。
 
-当前 NAS 已配置常驻局域网预览服务：<http://192.168.91.85:5173>，与浏览器设备处于可互通的局域网即可访问。服务管理及地址说明见 [局域网访问](docs/local-access.md)。运行此服务时，默认开发端口 5173 已占用。
+当前 NAS 的正式访问地址为 <https://mail.leixin.me>，由现有反向代理提供 HTTPS。浏览器登录、PWA 安装和 Google 授权均使用此域名；`http://192.168.91.85:5173` 仅作为反向代理后端和健康检查地址。服务管理及来源配置说明见 [NAS 访问与管理](docs/local-access.md)。运行此服务时，默认开发端口 5173 已占用。
 
 ## 本地开发
 
@@ -66,17 +66,17 @@ docker compose ps
 docker compose logs --tail=100 mailnest
 ```
 
-基础 Docker 配置将数据库存于持久卷 `mailnest_data`，应用以非 root 用户运行。当前 NAS 使用 `/volume2/docker/mailnest` 和 `deploy/compose.nas.yml` 模板，数据绑定至该目录的 `data/`，保留原访问地址 `http://192.168.91.85:5173`；管理命令见 [局域网说明](docs/local-access.md)。公网域名、Caddy 自动 HTTPS、反向代理及备份步骤见 [部署文档](docs/deployment.md)。
+基础 Docker 配置将数据库存于持久卷 `mailnest_data`，应用以非 root 用户运行。当前 NAS 使用 `/volume2/docker/mailnest` 和 `deploy/compose.nas.yml` 模板，数据绑定至该目录的 `data/`，现有反向代理将 <https://mail.leixin.me> 转发到 NAS 的 HTTP 5173 端口。部署目录 `.env` 使用 `NODE_ENV=production`、`APP_URL=https://mail.leixin.me`、`GOOGLE_REDIRECT_URI=https://mail.leixin.me/api/v1/oauth/google/callback`、`TRUST_PROXY=true`。修改这些环境变量后执行 `docker compose up -d --force-recreate mailnest`，单独 `restart` 不会加载新的容器环境。管理命令见 [NAS 说明](docs/local-access.md)，现有代理、独立 Caddy 模板及备份步骤见 [部署文档](docs/deployment.md)。
 
 ## PWA 与提醒
 
 点击页面顶部的“安装应用”，或进入“设置 → 应用与提醒”安装。在支持的浏览器提供安装事件后，按钮会触发系统安装窗口；其他情况下会显示对应设备的操作指引。取消或安装窗口失败后可再次查看指引，从独立应用打开时显示“已安装”。
 
-完整 PWA 安装和推送提醒需要 HTTPS；`localhost` 可供本机测试。当前 NAS 的 `http://192.168.91.85:5173` 是 HTTP 局域网预览地址，按钮会说明限制；浏览器若支持，可先添加桌面快捷方式，该地址不提供离线与后台推送。部署 HTTPS 后重新打开页面即可使用完整安装能力，按钮不能绕过浏览器的安全要求。[MDN 安装要求](https://developer.mozilla.org/en-US/docs/Web/Progressive_web_apps/Guides/Making_PWAs_installable)
+完整 PWA 安装和推送提醒需要 HTTPS；`localhost` 可供本机测试。当前 NAS 请从 <https://mail.leixin.me> 打开页面并安装应用。旧 HTTP IP 地址上的快捷方式应改为此域名，HTTP 后端地址不用于浏览器登录、PWA 或后台推送。安装按钮不能绕过浏览器的安全要求。[MDN 安装要求](https://developer.mozilla.org/en-US/docs/Web/Progressive_web_apps/Guides/Making_PWAs_installable)
 
 Android / 桌面可使用浏览器安装菜单；iPhone / iPad 可在 Safari 的分享菜单选择“添加到主屏幕”。启用通知需要用户主动授权，iOS / iPadOS 16.4+ 的 Web Push 要从主屏幕应用内启用。[WebKit 官方说明](https://webkit.org/blog/13878/web-push-for-web-apps-on-ios-and-ipados/)
 
-页面打开时通过 SSE 接收同步 / 新邮件事件；配置 VAPID 并订阅后，后台通过 Web Push 提醒。提醒由同步发现新邮件触发，实际送达受浏览器、系统通知权限和网络影响。首次同步不会将已有邮件作为新邮件提醒。Service Worker 只缓存应用静态资源，不缓存登录后的邮件 API 或附件；离线页面不提供邮件收发。
+页面打开时通过 SSE 接收同步 / 新邮件事件；配置 VAPID 并订阅后，后台通过 Web Push 提醒。推送订阅不拦截 DNS / IP 地址，沿用运行环境的 TUN / 代理连接；设置页会重新登记已有订阅，服务端确认后才显示已开启。提醒由同步发现新邮件触发，实际送达受浏览器、系统通知权限和网络影响。首次同步不会将已有邮件作为新邮件提醒。Service Worker 只缓存应用静态资源，不缓存登录后的邮件 API 或附件；离线页面不提供邮件收发。
 
 ## API 与维护
 
@@ -97,3 +97,9 @@ npm run test:e2e
 可选执行 `npm run test:mail`：使用 Docker / OpenSSL 自动搭建隔离的 GreenMail TLS 邮箱，验证两个账号、IMAP 标记 / 移动、SMTP 发信与附件。测试范围和环境见 [测试文档](docs/testing.md)。
 
 目录：`server/` 后端；`web/` 前端与 PWA；`docs/` 接口和部署文档；`deploy/` Caddy 模板；`scripts/init.mjs` 初始化；`shared/api-contract.md` 开发协作契约。
+
+## 平板与返回导航
+
+可用宽度达到 1024 CSS 像素时，电脑和平板都显示邮箱导航、邮件列表、正文三栏；两条分隔线支持鼠标、触摸和键盘调整，刷新保留宽度。触屏分隔线提供 16 像素拖动区域，正文最小宽度为 320 像素；较窄竖屏自动切换布局。
+
+返回手势优先关闭当前弹层或从邮件返回列表。写信时沿用草稿丢弃确认，取消会保留原草稿。独立 PWA 在根页首次返回会提示“再次返回退出应用”，短时间内再次返回才退出；普通浏览器标签页保留返回之前网页的行为。

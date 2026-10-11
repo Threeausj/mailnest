@@ -765,7 +765,7 @@ test('long mail subjects stay compact, with enough visible rows and usable star 
   await noHorizontalOverflow(page);
   const back = page.getByRole('button',{name:'返回邮件列表',exact:true});
   const scroll = page.locator('.workspace-scroll');
-  const overviewScroll = page.viewportSize()!.width >= 1151 ? page.locator('.message-list-scroll') : scroll;
+  const overviewScroll = page.viewportSize()!.width >= 1024 ? page.locator('.message-list-scroll') : scroll;
   await back.evaluate((button: HTMLButtonElement) => button.click());
   await overviewScroll.evaluate(element => {element.scrollTop = 160;});
   await expect.poll(() => overviewScroll.evaluate(element => element.scrollTop)).toBe(160);
@@ -1145,6 +1145,190 @@ test('desktop panes resize by drag and keyboard, persist after reload and stay u
   await noHorizontalOverflow(page);
 });
 
+test('wide touch tablets keep three panes and resize both dividers by real finger gestures after reload', async ({ browser, baseURL }) => {
+  const context = await browser.newContext({baseURL,viewport:{width:1280,height:800},hasTouch:true,isMobile:false});
+  const page = await context.newPage();
+  const session = await context.newCDPSession(page);
+  const messages = mailboxMessages(4).map(message => ({...message,unread:false}));
+  await mockMailbox(page,messages);
+  await page.addInitScript(() => {
+    (window as any).__dividerPointerTypes = [];
+    document.addEventListener('pointerdown',event => {
+      if ((event.target as Element).closest('[role="separator"]')) (window as any).__dividerPointerTypes.push(event.pointerType);
+    },true);
+  });
+  const navigation = page.getByRole('complementary',{name:'邮箱导航'});
+  const list = page.getByRole('region',{name:'邮件列表'});
+  const reader = page.getByRole('main',{name:'邮件内容'});
+  const separators = page.getByRole('separator');
+  const widths = async () => ({sidebar:(await navigation.boundingBox())!.width,list:(await list.boundingBox())!.width,reader:(await reader.boundingBox())!.width});
+  const touchDrag = async (name: string, distance: number) => {
+    const bounds = (await page.getByRole('separator',{name,exact:true}).boundingBox())!;
+    expect(bounds.width).toBeGreaterThanOrEqual(14);
+    const x = bounds.x + bounds.width / 2, y = bounds.y + Math.min(180,bounds.height / 2);
+    let active = false;
+    try {
+      await session.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x,y,radiusX:3,radiusY:3}]});
+      active = true;
+      await expect(page.locator('.pane-drag-shield')).toBeVisible();
+      for (let step = 1; step <= 8; step++) {
+        await session.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x:x + distance * step / 8,y,radiusX:3,radiusY:3}]});
+        await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
+      }
+      await session.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+      active = false;
+      await expect(page.locator('.pane-drag-shield')).toHaveCount(0);
+    } finally {
+      if (active) await session.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+    }
+  };
+  try {
+    for (const viewport of [{width:1280,height:800},{width:1097,height:600}]) {
+      await page.setViewportSize(viewport);
+      await page.goto('/');
+      await expect(page.locator('.message-row')).toHaveCount(messages.length);
+      expect(await page.evaluate(() => matchMedia('(pointer: coarse)').matches)).toBe(true);
+      await expect(separators).toHaveCount(2);
+      for (const pane of [navigation,list,reader]) await expect(pane).toBeVisible();
+      const initial = await widths();
+      await page.getByRole('button',{name:`打开邮件：${messages[0].subject}`,exact:true}).click();
+      await expect(page.getByRole('heading',{name:messages[0].subject,exact:true})).toBeVisible();
+      // Selecting mail must retain the list beside the reading pane on a wide tablet.
+      for (const pane of [navigation,list,reader]) await expect(pane).toBeVisible();
+      await touchDrag('调整邮箱导航宽度',40);
+      await expect.poll(async () => (await widths()).sidebar - initial.sidebar).toBeGreaterThan(28);
+      const afterSidebar = await widths();
+      expect(Math.abs(afterSidebar.list - initial.list)).toBeLessThanOrEqual(1);
+      await touchDrag('调整邮件列表宽度',50);
+      await expect.poll(async () => (await widths()).list - afterSidebar.list).toBeGreaterThan(38);
+      const saved = await widths();
+      expect(saved.reader).toBeLessThan(initial.reader - 65);
+      expect(saved.reader).toBeGreaterThanOrEqual(319);
+      expect(await page.evaluate(() => (window as any).__dividerPointerTypes)).toEqual(['touch','touch']);
+      const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('mailnest:panes:v1')!));
+      expect(Math.abs(stored.sidebar - saved.sidebar)).toBeLessThanOrEqual(1);
+      expect(Math.abs(stored.list - saved.list)).toBeLessThanOrEqual(1);
+      await noHorizontalOverflow(page);
+      await page.reload();
+      await expect(separators).toHaveCount(2);
+      await expect.poll(async () => Math.abs((await widths()).sidebar - saved.sidebar)).toBeLessThanOrEqual(1);
+      await expect.poll(async () => Math.abs((await widths()).list - saved.list)).toBeLessThanOrEqual(1);
+      await noHorizontalOverflow(page);
+    }
+    await page.setViewportSize({width:768,height:1024});
+    await expect(separators).toHaveCount(0);
+    await noHorizontalOverflow(page);
+  } finally {
+    await session.detach();
+    await context.close();
+  }
+});
+
+test('browser back and forward restore mail and settings, and dismissing draft confirmation retains the draft', async ({ page }) => {
+  const messages = mailboxMessages(2).map((message,index) => ({...message,subject:`返回导航邮件 ${index + 1}`,unread:false}));
+  await mockMailbox(page,messages);
+  await page.goto('/');
+  const open = (index: number) => page.getByRole('button',{name:`打开邮件：${messages[index].subject}`,exact:true});
+  const heading = (index: number) => page.getByRole('heading',{name:messages[index].subject,exact:true});
+  await open(0).click();
+  await expect(heading(0)).toBeVisible();
+  // On desktop, changing the selection replaces the current reading level.
+  // On a small screen the same selection path is exercised without opening
+  // the hidden list or relying on a synthetic state mutation.
+  if (await open(1).isVisible()) {
+    await open(1).click();
+    await expect(heading(1)).toBeVisible();
+  }
+  const selected = await heading(1).isVisible() ? 1 : 0;
+  await page.goBack();
+  await expect(page.locator('.message-metadata')).toHaveCount(0);
+  await expect(open(0)).toBeVisible();
+  await page.goForward();
+  await expect(heading(selected)).toBeVisible();
+  await (await headerUtility(page,'邮件提醒设置')).click();
+  const settings = page.getByRole('dialog',{name:'设置',exact:true});
+  await expect(settings).toBeVisible();
+  await page.goBack();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(heading(selected)).toBeVisible();
+  await page.goForward();
+  await expect(settings).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await page.getByRole('toolbar',{name:'邮件操作',exact:true}).getByRole('button',{name:'回复邮件',exact:true}).click();
+  const composer = page.getByRole('dialog',{name:'回复邮件',exact:true});
+  await expect(composer).toBeVisible();
+  await composer.getByLabel('邮件正文').fill('浏览器返回取消后，草稿内容必须保留。');
+  const cancellation = page.waitForEvent('dialog');
+  const cancelledBack = page.goBack();
+  const discardPrompt = await cancellation;
+  expect(discardPrompt.type()).toBe('confirm');
+  expect(discardPrompt.message()).toContain('草稿');
+  await discardPrompt.dismiss();
+  await cancelledBack;
+  await expect(composer).toBeVisible();
+  await expect(composer.getByLabel('邮件正文')).toHaveValue('浏览器返回取消后，草稿内容必须保留。');
+  const confirmation = page.waitForEvent('dialog');
+  const acceptedBack = page.goBack();
+  const secondPrompt = await confirmation;
+  expect(secondPrompt.message()).toContain('草稿');
+  await secondPrompt.accept();
+  await acceptedBack;
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(heading(selected)).toBeVisible();
+  await noHorizontalOverflow(page);
+});
+
+test('standalone root back asks before exiting without stacking guards on reload, while normal tabs can return to the prior page', async ({ page, browser, baseURL }) => {
+  const previousPath = '/history-prior-page';
+  const previousPage = (target: Page) => target.route(`**${previousPath}`,route => route.fulfill({status:200,contentType:'text/html; charset=utf-8',body:'<!doctype html><html><head><meta charset="utf-8"></head><body><h1>之前的网页</h1></body></html>'}));
+  const messages = mailboxMessages(1).map(message => ({...message,unread:false}));
+  // Keep the synthetic prior document under route control. The production
+  // service worker deliberately serves its shell for unknown same-origin
+  // paths, which would replace this fixture when back performs a navigation.
+  const tabContext = await browser.newContext({baseURL,viewport:page.viewportSize()!,hasTouch:test.info().project.name !== 'desktop',serviceWorkers:'block'});
+  const tab = await tabContext.newPage();
+  try {
+    await mockMailbox(tab,messages);
+    await previousPage(tab);
+    await tab.goto(previousPath);
+    await tab.goto('/');
+    await expect(tab.locator('.message-row')).toHaveCount(1);
+    await tab.goBack();
+    await expect(tab).toHaveURL(new RegExp(`${previousPath}$`));
+    await expect(tab.getByRole('heading',{name:'之前的网页',exact:true})).toBeVisible();
+  } finally {
+    await tabContext.close();
+  }
+
+  const context = await browser.newContext({baseURL,viewport:page.viewportSize()!,hasTouch:test.info().project.name !== 'desktop',serviceWorkers:'block'});
+  const installed = await context.newPage();
+  await installed.addInitScript(() => Object.defineProperty(navigator,'standalone',{get:() => true,configurable:true}));
+  await mockMailbox(installed,messages);
+  await previousPage(installed);
+  try {
+    await installed.goto(previousPath);
+    await installed.goto('/');
+    await expect(installed.locator('.message-row')).toHaveCount(1);
+    const initialLength = await installed.evaluate(() => history.length);
+    for (let reload = 0; reload < 2; reload++) {
+      await installed.reload();
+      await expect(installed.locator('.message-row')).toHaveCount(1);
+      expect(await installed.evaluate(() => history.length)).toBe(initialLength);
+    }
+    await installed.goBack();
+    await expect(installed.locator('.message-row')).toHaveCount(1);
+    await expect(installed.getByText(/再次返回退出应用/)).toBeVisible();
+    // A deliberate second back remains available, preserving the platform's
+    // normal exit path instead of trapping the installed application forever.
+    await installed.goBack();
+    await expect(installed).toHaveURL(new RegExp(`${previousPath}$`));
+    await expect(installed.getByRole('heading',{name:'之前的网页',exact:true})).toBeVisible();
+  } finally {
+    await context.close();
+  }
+});
+
 test('HTML mail preserves styled cards, responsive typography, buttons, table layout and poster proportions', async ({ page }) => {
   const message = mailboxMessages(1)[0];
   message.subject = '带原始样式的邮件';
@@ -1228,6 +1412,119 @@ test('HTML mail preserves styled cards, responsive typography, buttons, table la
   await expect(frame.getByRole('img',{name:'不安全图片',exact:true})).toHaveCount(0);
   expect(await page.evaluate(() => (window as any).__mailExecuted)).toBeUndefined();
   expect(importedStyles).toBe(0);
+  await noHorizontalOverflow(page);
+});
+
+test('existing push subscription requires server acknowledgment, retries and survives settings reopen before disable', async ({ page }) => {
+  const publicKey = Buffer.concat([Buffer.from([4]),Buffer.alloc(64,1)]).toString('base64url');
+  const subscription = {
+    endpoint:'https://push.example.test/mailnest-existing-subscription',
+    keys:{p256dh:publicKey,auth:Buffer.alloc(16,2).toString('base64url')},
+  };
+  await page.addInitScript(subscription => {
+    const state = {subscribeCalls:0,unsubscribeCalls:0,permissionCalls:0,localSubscribed:true};
+    (window as any).__pushFixture = state;
+    class FixtureNotification {
+      static permission = 'granted';
+      static async requestPermission() { state.permissionCalls++; return 'granted'; }
+    }
+    Object.defineProperty(window,'Notification',{value:FixtureNotification,configurable:true});
+    const existing = {
+      endpoint:subscription.endpoint,
+      toJSON:() => subscription,
+      unsubscribe:async () => { state.unsubscribeCalls++; state.localSubscribed = false; return true; },
+    };
+    const registration = {
+      active:{},waiting:null,installing:null,addEventListener() {},
+      pushManager:{
+        getSubscription:async () => state.localSubscribed ? existing : null,
+        subscribe:async () => { state.subscribeCalls++; state.localSubscribed = true; return existing; },
+      },
+    };
+    Object.defineProperty(navigator,'serviceWorker',{
+      configurable:true,
+      value:{
+        controller:null,ready:Promise.resolve(registration),addEventListener() {},
+        getRegistration:async () => registration,
+        register:async () => registration,
+      },
+    });
+  },subscription);
+  await mockMailbox(page);
+  await page.route('**/api/v1/config',route => route.fulfill({
+    status:200,contentType:'application/json',
+    body:JSON.stringify({googleConfigured:false,pushPublicKey:publicKey,pollingInterval:3600}),
+  }));
+  const registrations: unknown[] = [];
+  const deletions: unknown[] = [];
+  const releaseRegistrations = new Map<number,() => void>();
+  let releaseDeletion = () => {};
+  await page.route('**/api/v1/push/subscriptions',async route => {
+    const request = route.request();
+    if (request.method() === 'POST') {
+      registrations.push(request.postDataJSON());
+      const attempt = registrations.length;
+      await new Promise<void>(resolve => releaseRegistrations.set(attempt,resolve));
+      return route.fulfill({
+        status:attempt === 1 ? 400 : 200,contentType:'application/json',
+        body:JSON.stringify(attempt === 1 ? {error:{code:'PRIVATE_HOST',message:'测试推送注册失败，请重试。'}} : {ok:true}),
+      });
+    }
+    if (request.method() === 'DELETE') {
+      deletions.push(request.postDataJSON());
+      await new Promise<void>(resolve => { releaseDeletion = resolve; });
+      return route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({ok:true})});
+    }
+    return route.fulfill({status:405,contentType:'application/json',body:JSON.stringify({error:{code:'METHOD_NOT_ALLOWED',message:'Unexpected fixture method'}})});
+  });
+  const pushState = () => page.evaluate(() => ({...(window as any).__pushFixture}));
+  await page.goto('/');
+  await (await headerUtility(page,'邮件提醒设置')).click();
+  const settings = page.getByRole('dialog',{name:'设置',exact:true});
+  expect(registrations).toHaveLength(0);
+  await settings.getByRole('tab',{name:'应用与提醒',exact:true}).click();
+  await expect.poll(() => registrations.length).toBe(1);
+  await expect(settings.getByRole('button',{name:'检查中…',exact:true})).toBeDisabled();
+  await expect(settings.getByText('本设备已开启后台邮件提醒。',{exact:true})).toHaveCount(0);
+  await expect(settings.getByRole('button',{name:'关闭后台提醒',exact:true})).toHaveCount(0);
+  expect(await pushState()).toEqual({subscribeCalls:0,unsubscribeCalls:0,permissionCalls:0,localSubscribed:true});
+  releaseRegistrations.get(1)!();
+  await expect(settings.getByRole('alert')).toContainText('测试推送注册失败，请重试。');
+  await expect(settings.getByRole('button',{name:'开启提醒',exact:true})).toBeEnabled();
+  await expect(settings.getByText('本设备已开启后台邮件提醒。',{exact:true})).toHaveCount(0);
+  expect(await pushState()).toMatchObject({subscribeCalls:0,unsubscribeCalls:0,localSubscribed:true});
+
+  await settings.getByRole('button',{name:'开启提醒',exact:true}).click();
+  await expect.poll(() => registrations.length).toBe(2);
+  await expect(settings.getByRole('alert')).toHaveCount(0);
+  await expect(settings.getByRole('button',{name:'处理中…',exact:true})).toBeDisabled();
+  await expect(settings.getByText('本设备已开启后台邮件提醒。',{exact:true})).toHaveCount(0);
+  expect(await pushState()).toEqual({subscribeCalls:0,unsubscribeCalls:0,permissionCalls:1,localSubscribed:true});
+  releaseRegistrations.get(2)!();
+  await expect(settings.getByText('本设备已开启后台邮件提醒。',{exact:true})).toBeVisible();
+  await expect(settings.getByRole('button',{name:'关闭后台提醒',exact:true})).toBeEnabled();
+
+  await settings.getByRole('button',{name:'关闭弹窗',exact:true}).click();
+  await expect(settings).toHaveCount(0);
+  await (await headerUtility(page,'邮件提醒设置')).click();
+  await settings.getByRole('tab',{name:'应用与提醒',exact:true}).click();
+  await expect.poll(() => registrations.length).toBe(3);
+  await expect(settings.getByRole('button',{name:'检查中…',exact:true})).toBeDisabled();
+  await expect(settings.getByText('本设备已开启后台邮件提醒。',{exact:true})).toHaveCount(0);
+  expect(registrations).toEqual([subscription,subscription,subscription]);
+  expect(await pushState()).toEqual({subscribeCalls:0,unsubscribeCalls:0,permissionCalls:1,localSubscribed:true});
+  releaseRegistrations.get(3)!();
+  await expect(settings.getByText('本设备已开启后台邮件提醒。',{exact:true})).toBeVisible();
+  await settings.getByRole('button',{name:'关闭后台提醒',exact:true}).click();
+  await expect.poll(() => deletions.length).toBe(1);
+  expect(deletions).toEqual([{endpoint:subscription.endpoint}]);
+  await expect(settings.getByRole('button',{name:'处理中…',exact:true})).toBeDisabled();
+  expect(await pushState()).toMatchObject({unsubscribeCalls:0,localSubscribed:true});
+  releaseDeletion();
+  await expect(settings.getByRole('button',{name:'开启提醒',exact:true})).toBeEnabled();
+  await expect(settings.getByText('本设备已开启后台邮件提醒。',{exact:true})).toHaveCount(0);
+  expect(await pushState()).toEqual({subscribeCalls:0,unsubscribeCalls:1,permissionCalls:1,localSubscribed:false});
+  expect(registrations).toHaveLength(3);
   await noHorizontalOverflow(page);
 });
 

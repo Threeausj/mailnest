@@ -11,8 +11,9 @@ const MIN_SIZES: PaneSizes = { sidebar: 140, list: 240 };
 const MAX_SIZES: PaneSizes = { sidebar: 320, list: 560 };
 const READER_MIN = 320;
 const DIVIDER_WIDTH = 6;
-const MIN_DESKTOP_WIDTH = MIN_SIZES.sidebar + MIN_SIZES.list + READER_MIN + DIVIDER_WIDTH * 2;
-const DESKTOP_QUERY = '(min-width: 1151px)';
+const TOUCH_DIVIDER_WIDTH = 16;
+const THREE_PANE_MIN_WIDTH = 1024;
+const TOUCH_QUERY = '(any-pointer: coarse)';
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
@@ -37,8 +38,8 @@ function saveSizes(sizes: PaneSizes) {
   catch { /* Resizing also works when the browser disables local storage. */ }
 }
 
-function fitSizes(preferred: PaneSizes, width: number): { sizes: PaneSizes; bounds: PaneBounds } {
-  const available = Math.max(MIN_SIZES.sidebar + MIN_SIZES.list, width - READER_MIN - DIVIDER_WIDTH * 2);
+function fitSizes(preferred: PaneSizes, width: number, dividerWidth: number): { sizes: PaneSizes; bounds: PaneBounds } {
+  const available = Math.max(MIN_SIZES.sidebar + MIN_SIZES.list, width - READER_MIN - dividerWidth * 2);
   const sidebarMax = Math.min(MAX_SIZES.sidebar, available - MIN_SIZES.list);
   const sidebar = clamp(preferred.sidebar, MIN_SIZES.sidebar, sidebarMax);
   const listMax = Math.min(MAX_SIZES.list, available - sidebar);
@@ -91,13 +92,15 @@ export function usePaneSizes(): PaneSizesController {
   const [preferred, setPreferred] = useState<PaneSizes>(readSizes);
   const preferredRef = useRef(preferred);
   const [width, setWidth] = useState(window.innerWidth);
-  const [wideViewport, setWideViewport] = useState(() => window.matchMedia(DESKTOP_QUERY).matches);
+  const [hasTouch, setHasTouch] = useState(() => window.matchMedia(TOUCH_QUERY).matches);
   const [activePane, setActivePane] = useState<PaneKind | null>(null);
   const dragRef = useRef<DragState | null>(null);
-  const fit = fitSizes(preferred, width);
-  const isDesktop = wideViewport && width >= MIN_DESKTOP_WIDTH;
-  const metrics = useRef({ width, isDesktop, fit });
-  metrics.current = { width, isDesktop, fit };
+  const dividerWidth = hasTouch ? TOUCH_DIVIDER_WIDTH : DIVIDER_WIDTH;
+  const fit = fitSizes(preferred, width, dividerWidth);
+  // Pane visibility depends on room for reading, including on touch-only tablets.
+  const isDesktop = width >= THREE_PANE_MIN_WIDTH;
+  const metrics = useRef({ width, dividerWidth, isDesktop, fit });
+  metrics.current = { width, dividerWidth, isDesktop, fit };
 
   const updatePreferred = useCallback((next: PaneSizes) => {
     preferredRef.current = next;
@@ -125,8 +128,8 @@ export function usePaneSizes(): PaneSizesController {
   }, [root, finishDrag]);
 
   useEffect(() => {
-    const media = window.matchMedia(DESKTOP_QUERY);
-    const update = () => { setWideViewport(media.matches); };
+    const media = window.matchMedia(TOUCH_QUERY);
+    const update = () => { setHasTouch(media.matches); };
     update();
     media.addEventListener('change', update);
     return () => media.removeEventListener('change', update);
@@ -155,7 +158,7 @@ export function usePaneSizes(): PaneSizesController {
 
   function applyWidth(kind: PaneKind, value: number, persist: boolean) {
     const current = metrics.current;
-    const { min, max } = fitSizes(preferredRef.current, current.width).bounds[kind];
+    const { min, max } = fitSizes(preferredRef.current, current.width, current.dividerWidth).bounds[kind];
     const next = { ...preferredRef.current, [kind]: Math.round(clamp(value, min, max)) };
     updatePreferred(next);
     if (persist) saveSizes(next);
@@ -196,7 +199,7 @@ export function usePaneSizes(): PaneSizesController {
 
   function resizeByKey(kind: PaneKind, event: KeyboardEvent<HTMLDivElement>) {
     if (!metrics.current.isDesktop || event.altKey || event.ctrlKey || event.metaKey) return;
-    const { sizes, bounds } = fitSizes(preferredRef.current, metrics.current.width);
+    const { sizes, bounds } = fitSizes(preferredRef.current, metrics.current.width, metrics.current.dividerWidth);
     let next: number;
     const step = event.shiftKey ? 40 : 10;
     if (event.key === 'ArrowLeft') next = sizes[kind] - step;
@@ -209,7 +212,7 @@ export function usePaneSizes(): PaneSizesController {
   }
 
   return {
-    rootRef, style: { '--sidebar-width': `${fit.sizes.sidebar}px`, '--message-list-width': `${fit.sizes.list}px`, '--pane-divider-width': `${DIVIDER_WIDTH}px` } as CSSProperties,
+    rootRef, style: { '--sidebar-width': `${fit.sizes.sidebar}px`, '--message-list-width': `${fit.sizes.list}px`, '--pane-divider-width': `${dividerWidth}px` } as CSSProperties,
     isDesktop, isDragging: activePane !== null, widths: fit.sizes, bounds: fit.bounds, activePane,
     startDrag, moveDrag, endDrag, cancelDrag: () => finishDrag(false), reset, resizeByKey,
   };

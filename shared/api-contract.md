@@ -37,6 +37,9 @@ Message = MessageSummary & { text:string, html:string|null, messageId:string|nul
 - GET /events -> SSE; events named 'mail' with {accountId,count}, 'sync' with {accountId,status:'syncing'|'connected'|'partial'|'error'}, 'ready' with {}; user-scoped, cookie auth; partial means some folders failed while other folders continue syncing, refresh account.error for sanitized reasons
 - POST /push/subscriptions {endpoint:string,keys:{p256dh:string,auth:string}} -> {ok:true}
 - DELETE /push/subscriptions {endpoint:string} -> {ok:true}
+
+Push subscription endpoints retain the browser-provider HTTPS allowlist and key format validation. Registration performs no DNS/IP address filtering; network routing and resolution are delegated to the runtime/TUN, with normal HTTPS certificate verification. Re-registering the current user's endpoint updates its keys, including at the 20-device limit; another user's endpoint cannot be overwritten. The settings UI re-registers an existing browser subscription and reports it active only after the server acknowledges it.
+
 - GET /tokens -> {tokens:{id:string,name:string,createdAt:string,lastUsedAt:string|null}[]}
 - POST /tokens {name:string} -> {token:string,id:string}; plaintext only once
 - DELETE /tokens/:id -> {ok:true}
