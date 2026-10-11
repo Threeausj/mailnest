@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdtemp,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {randomUUID} from 'node:crypto';
+import {randomUUID,createHash} from 'node:crypto';
 import dns from 'node:dns';
 import dnsPromises from 'node:dns/promises';
 import {syncBuiltinESMExports} from 'node:module';
@@ -57,6 +57,11 @@ function sendTest(project:Project,cookie:string,url:string) {
   return project.app.inject({method:'POST',url:'/api/v1/push/test',headers:{cookie,origin},payload:{endpoint:url}});
 }
 function payload(call:SendParameters) {return JSON.parse(String(call[1])) as {unreadCount:number;title:string;body:string;url:string;tag:string;notificationId?:string};}
+function assertDeliveryOptions(call:SendParameters) {
+  const notificationId=payload(call).notificationId;
+  assert.match(notificationId||'',/^[a-f\d]{8}-[a-f\d]{4}-4[a-f\d]{3}-[89ab][a-f\d]{3}-[a-f\d]{12}$/i);
+  assert.deepEqual(call[2],{TTL:3600,timeout:10_000,contentEncoding:'aes128gcm',urgency:'high',topic:createHash('sha256').update(notificationId!).digest('base64url').slice(0,32)});
+}
 
 test('explicit test sends only to the selected owned device, keeps unread state and excludes duplicate labels and other owners',async()=>fixture(async(project,userId,cookie,delivery)=>{
   const first=seedAccount(project,userId,3);seedAccount(project,userId,4);seedAccount(project,userId,0);seedAccount(project,foreignUser(project),500);
@@ -65,8 +70,8 @@ test('explicit test sends only to the selected owned device, keeps unread state 
   const before=project.store.db.prepare('SELECT id,unread FROM accounts ORDER BY id').all();
   const response=await sendTest(project,cookie,selected);
   assert.equal(response.statusCode,200,response.body);assert.deepEqual(response.json(),{ok:true,accepted:true});assert.equal(response.headers['cache-control'],'no-store');
-  assert.equal(delivery.calls.length,1);assert.equal(delivery.calls[0][0].endpoint,selected);assert.deepEqual(delivery.calls[0][2],{TTL:300,timeout:10_000});
-  assert.deepEqual(payload(delivery.calls[0]),{title:'MailNest 测试通知',body:'邮件提醒测试成功。',url:'/',tag:'mailnest-test',unreadCount:7});
+  assert.equal(delivery.calls.length,1);assert.equal(delivery.calls[0][0].endpoint,selected);assertDeliveryOptions(delivery.calls[0]);
+  assert.deepEqual(payload(delivery.calls[0]),{title:'MailNest 测试通知',body:'邮件提醒测试成功。',url:'/',tag:'mailnest-test',notificationId:payload(delivery.calls[0]).notificationId,unreadCount:7});
   assert.deepEqual(project.store.db.prepare('SELECT id,unread FROM accounts ORDER BY id').all(),before);
   assert.equal(project.store.db.prepare('SELECT COUNT(*) AS n FROM messages').get()!.n,9);
   assert.equal(response.body.includes(selected),false);assert.equal(response.body.includes(keys.auth),false);
@@ -99,6 +104,8 @@ test('push tests enforce a shared per-user cooldown before concurrent delivery a
     now+=14_999;const nearly=await sendTest(project,cookie,other);assert.equal(nearly.statusCode,429);assert.equal(nearly.headers['retry-after'],'1');
     release();assert.equal((await first).statusCode,200);now+=1;delete delivery.wait;
     assert.equal((await sendTest(project,cookie,other)).statusCode,200);assert.equal(delivery.calls.length,2);
+    for(const call of delivery.calls){assertDeliveryOptions(call);assert.equal(payload(call).tag,'mailnest-test');}
+    assert.notEqual(payload(delivery.calls[0]).notificationId,payload(delivery.calls[1]).notificationId);assert.notEqual(delivery.calls[0][2]!.topic,delivery.calls[1][2]!.topic);
   }finally{release();await first;date.mock.restore();}
 }));
 
@@ -130,10 +137,23 @@ test('normal mail notifications include the total inbox unread count and keep ex
   const hooks=project.mail as unknown as MailHooks;
   const notificationId=randomUUID();
   await hooks.notify(userId,account,2,notificationId);assert.deepEqual(delivery.calls.map(call=>call[0].endpoint).sort(),[first,second].sort());
-  for(const call of delivery.calls){assert.equal(payload(call).unreadCount,20);assert.equal(payload(call).body,'有 2 封新邮件等待查看');assert.equal(payload(call).notificationId,notificationId);assert.equal(payload(call).tag,`mail-${account}`);}
+  for(const call of delivery.calls){assertDeliveryOptions(call);assert.equal(payload(call).unreadCount,20);assert.equal(payload(call).body,'有 2 封新邮件等待查看');assert.equal(payload(call).notificationId,notificationId);assert.equal(payload(call).tag,`mail-${account}`);}
   delivery.error={statusCode:410};await hooks.notify(userId,account,1);
   assert.notEqual(payload(delivery.calls[2]).notificationId,notificationId);assert.equal(payload(delivery.calls[2]).notificationId,payload(delivery.calls[3]).notificationId);
   assert.equal(project.store.db.prepare('SELECT COUNT(*) AS n FROM push_subscriptions WHERE user_id=?').get(userId)!.n,0);assert.ok(project.store.db.prepare('SELECT endpoint FROM push_subscriptions WHERE endpoint=?').get(outside));
+}));
+
+test('provider topics are stable for one notification batch and distinct for later mail and explicit tests',async()=>fixture(async(project,userId,cookie,delivery)=>{
+  const account=seedAccount(project,userId,2),selected=endpoint('batch-topics');seedSubscription(project,userId,selected);
+  const hooks=project.mail as unknown as MailHooks,firstId=randomUUID(),nextId=randomUUID();
+  await hooks.notify(userId,account,1,firstId);await hooks.notify(userId,account,1,firstId);await hooks.notify(userId,account,1,nextId);
+  assert.equal((await sendTest(project,cookie,selected)).statusCode,200);assert.equal(delivery.calls.length,4);
+  for(const call of delivery.calls)assertDeliveryOptions(call);
+  assert.equal(delivery.calls[0][2]!.topic,delivery.calls[1][2]!.topic);
+  assert.notEqual(delivery.calls[1][2]!.topic,delivery.calls[2][2]!.topic);assert.notEqual(delivery.calls[2][2]!.topic,delivery.calls[3][2]!.topic);
+  assert.equal(payload(delivery.calls[0]).tag,`mail-${account}`);assert.equal(payload(delivery.calls[2]).tag,`mail-${account}`);assert.equal(payload(delivery.calls[3]).tag,'mailnest-test');
+  assert.notEqual(payload(delivery.calls[3]).notificationId,firstId);assert.notEqual(payload(delivery.calls[3]).notificationId,nextId);
+  assert.equal(payload(delivery.calls[3]).unreadCount,2);
 }));
 
 test('SSE ready and account updates include the current scoped unread total without remote mail access',async()=>fixture(async(project,userId,cookie)=>{

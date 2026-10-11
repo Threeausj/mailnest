@@ -163,9 +163,9 @@ Google OAuth 邮箱只允许修改 `name` / `color`，修改地址、服务器�
 
 `POST /push/test` 传入 `{endpoint}`，使用服务端保存的订阅密钥，仅向当前用户的这一台已登记设备发送测试通知，不群发。成功响应为 `{ok:true,accepted:true}`，表示推送服务已接受请求，不保证设备已经收到或系统一定显示通知；只有用户点击测试按钮才调用该接口。每用户所有设备共用 15 秒测试间隔，发送失败也占用本次间隔；过于频繁返回 `429 PUSH_TEST_RATE_LIMIT`，并通过 `Retry-After` 告知需等待的秒数。未知或不属于本人订阅返回相同的 `404 PUSH_SUBSCRIPTION_NOT_FOUND`；服务商返回 404 / 410 时删除该设备的过期订阅并返回 `410 PUSH_SUBSCRIPTION_EXPIRED`，需要重新开启提醒；其他发送失败返回 `503 PUSH_DELIVERY_FAILED`，稍后可重试，保留订阅。未配置 VAPID 返回 `503 PUSH_NOT_CONFIGURED`。接口不做 DNS / IP 预检，仍限制浏览器服务商 HTTPS 地址并校验 TLS，不返回 endpoint、订阅密钥或服务商的原始错误。
 
-新邮件和测试通知的 Push JSON 均包含 `{title,body,url,tag,unreadCount}`；正常新邮件另含 `notificationId` UUID，与对应 SSE `mail` 事件相同。未读总数与 SSE 使用相同口径；测试不会制造未读邮件，也不会修改已有未读状态。INBOX 建立成功同步基线后，后续发现的新到邮件都会触发提醒，包括已被其他客户端标为已读的邮件；首次导入及 UIDVALIDITY 重置时不会将历史邮件作为新邮件提醒。
+新邮件和测试通知的 Push JSON 均包含 `{title,body,url,tag,notificationId,unreadCount}`，其中 `notificationId` 为 UUID；正常新邮件与对应 SSE `mail` 事件使用相同 ID，测试通知独立生成 ID，进入相同的 Worker 展示 / 去重路径。两者均使用高优先级 `urgency:high`、1 小时有效期 `TTL:3600`、`aes128gcm` 加密；topic 按本批通知 ID 派生，同批次可替换，不同批次不会相互覆盖。未读总数与 SSE 使用相同口径；测试不会制造未读邮件，也不会修改已有未读状态。INBOX 建立成功同步基线后，后续发现的新到邮件都会触发提醒，包括已被其他客户端标为已读的邮件；首次导入及 UIDVALIDITY 重置时不会将历史邮件作为新邮件提醒。
 
-前台 SSE 与后台 Push 通过同一 Service Worker 展示，同一 `notificationId` 只提醒一次；普通通知按邮箱归组，并开启 `renotify`，后续不同批次仍再次提醒。Worker 仅持久保存通知 UUID 与展示时间，最多 128 条、保留 7 天，不保存邮件内容或订阅密钥；存储不可用时使用当前 Worker 内存去重。需要 VAPID 公私钥、用户主动授权、HTTPS 和浏览器支持。登录及回到前台时会将已有且 VAPID 公钥匹配的浏览器订阅重新登记；没有订阅时不会自动请求权限或创建订阅。公钥变更需在设置重新开启提醒；设置页在服务端保存成功后才显示已开启。服务端记录正常新邮件推送的接受 / 失败状态、通知 ID 和订阅摘要，不记录完整 endpoint、授权密钥、邮件内容或服务商原始错误。Push 接受并不保证实际送达或显示。
+前台 SSE 与后台 Push 通过同一 Service Worker 展示，同一 `notificationId` 只提醒一次；普通通知按邮箱归组，并开启 `renotify`，后续不同批次仍再次提醒。Worker 仅持久保存通知 UUID 与展示时间，最多 128 条、保留 7 天，不保存邮件内容或订阅密钥；历史读取和写入各限 500 毫秒，异常或挂起后永久降级至当前 Worker 内存去重；迟到回调不恢复该 Worker 的持久存储，不会阻塞后续通知。需要 VAPID 公私钥、用户主动授权、HTTPS 和浏览器支持。登录及回到前台时会将已有且 VAPID 公钥匹配的浏览器订阅重新登记；没有订阅时不会自动请求权限或创建订阅。公钥变更需在设置重新开启提醒；设置页在服务端保存成功后才显示已开启。服务端记录正常新邮件推送的接受 / 失败状态、通知 ID 和订阅摘要，不记录完整 endpoint、授权密钥、邮件内容或服务商原始错误。Push 接受并不保证实际送达或显示。
 
 ## 文档维护
 

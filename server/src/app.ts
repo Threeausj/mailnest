@@ -8,6 +8,7 @@ import { dirname, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import type { ServerResponse } from 'node:http';
 import webPush from 'web-push';
+import type { RequestOptions } from 'web-push';
 import { type Config, loadConfig, repoRoot, frontendBuilt } from './config.js';
 import { Store, type UserRow, type AccountRow, type MessageRow, accountDto, summaryDto, userDto } from './db.js';
 import { ApiError, hashPassword, verifyPassword, hashToken, randomToken, safeMailError } from './security.js';
@@ -29,6 +30,10 @@ function validatePushEndpoint(endpoint:string) {
   if(url.protocol!=='https:'||url.username||url.password||url.port||!trustedPushHosts.some(host=>url.hostname===host||url.hostname.endsWith(`.${host}`)))throw new ApiError(400,'INVALID_PUSH_ENDPOINT','仅支持浏览器提供的 HTTPS 推送服务地址。');
 }
 function pushStatus(error:unknown) {return error&&typeof error==='object'?(error as {statusCode?:number}).statusCode:undefined;}
+function pushDeliveryOptions(notificationId:string):RequestOptions {
+  // Give an idle device time to reconnect without collapsing separate batches.
+  return{TTL:3600,timeout:10_000,contentEncoding:'aes128gcm',urgency:'high',topic:createHash('sha256').update(notificationId).digest('base64url').slice(0,32)};
+}
 interface EventClient {response:ServerResponse;sessionId:string;userId:string;expiresAt:number}
 
 export async function buildApp(config:Config=loadConfig()) {
@@ -52,7 +57,7 @@ export async function buildApp(config:Config=loadConfig()) {
     await Promise.allSettled(rows.map(async row=>{
       const subscriptionId=createHash('sha256').update(row.endpoint).digest('hex').slice(0,12);
       try {
-        const response=await webPush.sendNotification(JSON.parse(row.subscription),payload,{TTL:300,timeout:10_000});
+        const response=await webPush.sendNotification(JSON.parse(row.subscription),payload,pushDeliveryOptions(notificationId));
         app.log.info({notificationId,accountId,subscriptionId,statusCode:response.statusCode},'New-mail push accepted');
       } catch(error) {
         const code=pushStatus(error),expired=code===404||code===410;
@@ -243,7 +248,8 @@ export async function buildApp(config:Config=loadConfig()) {
     try {
       const subscription=pushSchema.parse(JSON.parse(row.subscription));
       if(subscription.endpoint!==input.endpoint)throw new Error('Invalid stored push subscription');
-      await webPush.sendNotification(subscription,JSON.stringify({title:'MailNest 测试通知',body:'邮件提醒测试成功。',url:'/',tag:'mailnest-test',unreadCount:unreadCount(userId)}),{TTL:300,timeout:10_000});
+      const notificationId=randomUUID();
+      await webPush.sendNotification(subscription,JSON.stringify({title:'MailNest 测试通知',body:'邮件提醒测试成功。',url:'/',tag:'mailnest-test',notificationId,unreadCount:unreadCount(userId)}),pushDeliveryOptions(notificationId));
     }catch(error){
       const code=pushStatus(error);
       if(code===404||code===410){store.db.prepare('DELETE FROM push_subscriptions WHERE endpoint=? AND user_id=? AND subscription=?').run(input.endpoint,userId,row.subscription);throw new ApiError(410,'PUSH_SUBSCRIPTION_EXPIRED','当前设备的提醒订阅已过期，请重新开启邮件提醒。');}

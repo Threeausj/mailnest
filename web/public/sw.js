@@ -43,19 +43,44 @@ async function updateAppBadge(unreadCount) {
   if (!Number.isSafeInteger(unreadCount) || unreadCount < 0) return;
   try {
     if (unreadCount > 0) {
-      if (typeof self.navigator?.setAppBadge === 'function') await self.navigator.setAppBadge(unreadCount);
-    } else if (typeof self.navigator?.clearAppBadge === 'function') await self.navigator.clearAppBadge();
-    else if (typeof self.navigator?.setAppBadge === 'function') await self.navigator.setAppBadge(0);
+      if (typeof self.navigator?.setAppBadge === 'function') await notificationDeadline(self.navigator.setAppBadge(unreadCount), 500);
+    } else if (typeof self.navigator?.clearAppBadge === 'function') await notificationDeadline(self.navigator.clearAppBadge(), 500);
+    else if (typeof self.navigator?.setAppBadge === 'function') await notificationDeadline(self.navigator.setAppBadge(0), 500);
   } catch { /* App badges are optional and may require notification permission. */ }
 }
 
 const NOTIFICATION_RETENTION = 7 * 24 * 60 * 60 * 1000;
 const NOTIFICATION_LIMIT = 128;
+const NOTIFICATION_STORAGE_TIMEOUT = 500;
 const shownNotifications = new Map();
 let notificationQueue = Promise.resolve();
 let notificationHistoryReady;
 let notificationDatabase;
+let notificationDatabaseOpening;
 let canPersistNotifications = true;
+
+function notificationDeadline(operation, milliseconds, onTimeout) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      try { onTimeout?.(); } catch { /* Storage cleanup must never block fallback. */ }
+      reject(new Error('Notification operation timed out'));
+    }, milliseconds);
+    Promise.resolve(operation).then(value => { clearTimeout(timer); resolve(value); }, error => { clearTimeout(timer); reject(error); });
+  });
+}
+
+function disableNotificationPersistence() {
+  canPersistNotifications = false;
+  try { notificationDatabase?.close(); } catch { /* The worker can continue with memory history. */ }
+  notificationDatabase = undefined;
+}
+
+function notificationStorageDeadline(operation, expiresAt, transaction) {
+  return notificationDeadline(operation, Math.max(0, expiresAt - Date.now()), () => {
+    try { transaction?.abort(); } catch { /* A completed or unavailable transaction needs no cleanup. */ }
+    disableNotificationPersistence();
+  });
+}
 
 function notificationId(payload) {
   // Store only opaque identifiers, never a title, body, endpoint or credential.
@@ -70,14 +95,28 @@ function isTrustedClientMessage(event) {
 }
 
 function openNotificationDatabase() {
-  if (!notificationDatabase) notificationDatabase = new Promise((resolve, reject) => {
+  if (!canPersistNotifications) return Promise.reject(new Error('Notification storage unavailable'));
+  if (notificationDatabase) return Promise.resolve(notificationDatabase);
+  if (!notificationDatabaseOpening) notificationDatabaseOpening = new Promise((resolve, reject) => {
     const request = indexedDB.open('mailnest-notification-history', 1);
-    request.onupgradeneeded = () => request.result.createObjectStore('shown', { keyPath: 'id' });
-    request.onsuccess = () => resolve(request.result);
+    request.onupgradeneeded = () => {
+      if (!canPersistNotifications) { request.transaction?.abort(); return; }
+      request.result.createObjectStore('shown', { keyPath: 'id' });
+    };
+    request.onsuccess = () => {
+      if (!canPersistNotifications) {
+        request.result.close();
+        reject(new Error('Notification storage retired'));
+        return;
+      }
+      notificationDatabase = request.result;
+      notificationDatabase.onversionchange = disableNotificationPersistence;
+      resolve(notificationDatabase);
+    };
     request.onerror = () => reject(request.error);
     request.onblocked = () => reject(new Error('Notification history unavailable'));
   });
-  return notificationDatabase;
+  return notificationDatabaseOpening;
 }
 
 function pruneMemoryHistory() {
@@ -88,20 +127,23 @@ function pruneMemoryHistory() {
 
 async function loadNotificationHistory() {
   if (!notificationHistoryReady) notificationHistoryReady = (async () => {
+    const expiresAt = Date.now() + NOTIFICATION_STORAGE_TIMEOUT;
     try {
-      const database = await openNotificationDatabase();
-      const records = await new Promise((resolve, reject) => {
-        const transaction = database.transaction('shown', 'readonly');
+      const database = await notificationStorageDeadline(openNotificationDatabase(), expiresAt);
+      if (!canPersistNotifications) return;
+      const transaction = database.transaction('shown', 'readonly');
+      const records = await notificationStorageDeadline(new Promise((resolve, reject) => {
         const request = transaction.objectStore('shown').getAll();
         request.onsuccess = () => resolve(request.result);
         request.onerror = () => reject(request.error);
         transaction.onabort = () => reject(transaction.error);
-      });
+      }), expiresAt, transaction);
+      if (!canPersistNotifications) return;
       for (const record of records.sort((a, b) => a.shownAt - b.shownAt)) {
         if (notificationId({ notificationId: record.id }) && Number.isFinite(record.shownAt)) shownNotifications.set(record.id, record.shownAt);
       }
       pruneMemoryHistory();
-    } catch { canPersistNotifications = false; }
+    } catch { disableNotificationPersistence(); }
   })();
   await notificationHistoryReady;
 }
@@ -111,14 +153,17 @@ async function recordShownNotification(id) {
   shownNotifications.set(id, shownAt);
   pruneMemoryHistory();
   if (!canPersistNotifications) return;
+  const expiresAt = Date.now() + NOTIFICATION_STORAGE_TIMEOUT;
   try {
-    const database = await openNotificationDatabase();
-    await new Promise((resolve, reject) => {
-      const transaction = database.transaction('shown', 'readwrite');
+    const database = await notificationStorageDeadline(openNotificationDatabase(), expiresAt);
+    if (!canPersistNotifications) return;
+    const transaction = database.transaction('shown', 'readwrite');
+    await notificationStorageDeadline(new Promise((resolve, reject) => {
       const store = transaction.objectStore('shown');
       store.put({ id, shownAt });
       const request = store.getAll();
       request.onsuccess = () => {
+        if (!canPersistNotifications) return;
         const records = request.result.sort((a, b) => b.shownAt - a.shownAt);
         const cutoff = shownAt - NOTIFICATION_RETENTION;
         records.forEach((record, index) => {
@@ -128,8 +173,8 @@ async function recordShownNotification(id) {
       transaction.oncomplete = () => resolve();
       transaction.onerror = () => reject(transaction.error);
       transaction.onabort = () => reject(transaction.error);
-    });
-  } catch { canPersistNotifications = false; }
+    }), expiresAt, transaction);
+  } catch { disableNotificationPersistence(); }
 }
 
 function mailNotificationTag(payload) {

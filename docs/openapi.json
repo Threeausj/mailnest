@@ -3044,7 +3044,7 @@
       },
       "PushNotification": {
         "type": "object",
-        "description": "正常新邮件与显式测试发送给 Service Worker 的 Web Push JSON；测试不会改变未读数。正常新邮件含 notificationId，与对应 SSE 相同；测试通知不含该字段。",
+        "description": "正常新邮件与显式测试发送给 Service Worker 的 Web Push JSON。两者均含通知 UUID 并进入同一展示 / 去重路径；正常新邮件 ID 与对应 SSE 相同，测试 ID 独立且不改变未读数。统一 high urgency、TTL 3600 秒、aes128gcm，topic 按 ID 派生。",
         "properties": {
           "title": {
             "type": "string"
@@ -3067,7 +3067,7 @@
           "notificationId": {
             "type": "string",
             "format": "uuid",
-            "description": "本批新到邮件的通知 UUID；正常 Web Push 与对应 SSE 共用，用于避免重复展示。"
+            "description": "本次通知 UUID；正常新邮件与对应 SSE 共用，用于避免重复展示；测试通知独立生成并进入同一处理路径。"
           }
         },
         "required": [
@@ -3075,7 +3075,8 @@
           "body",
           "url",
           "tag",
-          "unreadCount"
+          "unreadCount",
+          "notificationId"
         ]
       }
     },

@@ -1766,6 +1766,107 @@ test('push worker deduplicates matching push and trusted client notifications ac
   }
 });
 
+test('push worker storage and badge deadlines keep new mail and test notifications moving after hangs and late callbacks', async ({ page }) => {
+  await page.goto('/');
+  const workerSource = await (await page.request.get('/sw.js')).text();
+  const results = await page.evaluate(async source => {
+    const run = async (mode: string) => {
+      const ids = Array.from({length:4},() => crypto.randomUUID());
+      const script = `
+        const displayed = [], attempts = [], badgeCalls = [], outcomes = [];
+        let failDisplay = false, closed = 0, lateCallbacks = 0;
+        const mode = ${JSON.stringify(mode)}, ids = ${JSON.stringify(ids)};
+        const database = {
+          close(){closed++;},
+          transaction(_store,access){
+            const transaction = {abort(){transaction.onabort?.();},objectStore(){return {
+              put(){},delete(){},getAll(){
+                const request = {};
+                const complete = () => {
+                  request.result = access === 'readonly' && mode === 'late-read' ? [{id:ids[1],shownAt:Date.now()}] : [];
+                  request.onsuccess?.();
+                  if(access === 'readwrite' && mode !== 'write-hang')transaction.oncomplete?.();
+                };
+                if(access === 'readonly' && mode === 'read-hang')return request;
+                if(access === 'readonly' && mode === 'late-read')setTimeout(() => {lateCallbacks++;complete();},750);
+                else queueMicrotask(complete);
+                return request;
+              }
+            };}};
+            return transaction;
+          },
+        };
+        Object.defineProperty(self,'indexedDB',{value:{open(){
+          const request = {};
+          const complete = () => {request.result = database;request.onsuccess?.();};
+          if(mode === 'open-hang')return request;
+          if(mode === 'late-open')setTimeout(() => {lateCallbacks++;complete();},750);
+          else queueMicrotask(complete);
+          return request;
+        }}});
+        Object.defineProperty(navigator,'setAppBadge',{value:count => {
+          badgeCalls.push(count);
+          return mode === 'badge-hang' ? new Promise(() => {}) : Promise.resolve();
+        }});
+        self.registration = {showNotification:async (title,options) => {
+          attempts.push({title,options});
+          if(failDisplay)throw Error('Fixture display failed');
+          displayed.push({title,options});
+        }};
+        ${source}
+        self.onmessage = async event => {
+          if(event.data !== 'RUN')return;
+          const payload = (index,title) => ({notificationId:ids[index],accountId:'fixture-account',title,unreadCount:index+1});
+          const fire = (entry,data) => {
+            let completion;
+            const event = new Event(entry === 'client' ? 'message' : 'push');
+            event.waitUntil = promise => completion = Promise.resolve(promise);
+            if(entry === 'client'){
+              event.data = {type:'MAIL_NOTIFICATION',payload:data};
+              event.source = {type:'window',url:self.location.origin+'/'};
+              event.origin = self.location.origin;
+            }else event.data = {json:() => data};
+            self.dispatchEvent(event);
+            return completion;
+          };
+          try{
+            const work = (async () => {
+              await Promise.all([fire('push',payload(0,'第一封')),fire('client',payload(0,'第一封'))]);
+              await Promise.all([fire('push',payload(1,'第二封')),fire('push',{...payload(2,'测试提醒'),tag:'mailnest-test'})]);
+              // Late storage callbacks must not re-enable persistence or overwrite memory history.
+              await new Promise(resolve => setTimeout(resolve,800));
+              await fire('client',payload(0,'第一封'));
+              failDisplay = true;
+              outcomes.push(...(await Promise.allSettled([fire('push',payload(3,'重试邮件'))])).map(value => value.status));
+              failDisplay = false;
+              await fire('client',payload(3,'重试邮件'));
+              return {mode,displayed,attempts,badgeCalls,outcomes,closed,lateCallbacks};
+            })();
+            const result = await Promise.race([work,new Promise(resolve => setTimeout(() => resolve({mode,timedOut:true,displayed,attempts}),3500))]);
+            self.postMessage(result);
+          }catch(error){self.postMessage({mode,error:String(error)});}
+        };
+      `;
+      const url = URL.createObjectURL(new Blob([script],{type:'text/javascript'}));
+      const worker = new Worker(url);
+      try{return await new Promise<any>((resolve,reject) => {worker.onmessage=event => resolve(event.data);worker.onerror=event => reject(new Error(event.message));worker.postMessage('RUN');});}
+      finally{worker.terminate();URL.revokeObjectURL(url);}
+    };
+    return await Promise.all(['open-hang','read-hang','write-hang','late-open','late-read','badge-hang'].map(run));
+  },workerSource);
+  for (const result of results) {
+    expect(result.error,result.mode).toBeUndefined();
+    expect(result.timedOut,result.mode).not.toBe(true);
+    expect(result.displayed.map((item: any) => item.title),result.mode).toEqual(['第一封','第二封','测试提醒','重试邮件']);
+    expect(result.attempts).toHaveLength(5);
+    expect(result.outcomes).toEqual(['rejected']);
+    expect(result.badgeCalls).toEqual([1,1,2,3,1,4,4]);
+    if (['read-hang','write-hang','late-open','late-read'].includes(result.mode)) expect(result.closed,result.mode).toBeGreaterThan(0);
+    if (result.mode.startsWith('late-')) expect(result.lateCallbacks).toBe(1);
+    expect(result.displayed.every((item: any) => item.options.renotify)).toBe(true);
+  }
+});
+
 test('new mail SSE reaches the notification worker despite an existing subscription and failed registration, then foreground recovery retries', async ({ page }) => {
   const publicKey = Buffer.concat([Buffer.from([4]),Buffer.alloc(64,1)]).toString('base64url');
   const subscription = {endpoint:'https://push.example.test/sse-fixture',keys:{p256dh:publicKey,auth:Buffer.alloc(16,2).toString('base64url')}};
