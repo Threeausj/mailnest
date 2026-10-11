@@ -160,7 +160,7 @@ Google OAuth 邮箱只允许修改 `name` / `color`，修改地址、服务器�
 
 `GET /events` 返回 `text/event-stream`，使用浏览器 EventSource Cookie 连接。事件 `ready` 为 `{unreadCount}`，`mail` 为 `{accountId,count,notificationId,unreadCount,notification?}`，`sync` 为 `{accountId,status,unreadCount}`，status 为 `syncing` / `connected` / `partial` / `error`；收到 `partial` 后可刷新账号获取具体目录原因。`notification` 可选，结构为 `{subject,preview,from:{name,address}}`，来自本批新到 INBOX 邮件的最大 UID；主题 / 纯文本摘要 / 发件人名称 / 地址分别最多 120 / 200 / 80 / 254 个 Unicode 字符，归一空白和控制字符。兼容旧事件缺少该字段；正文提取失败时 `preview` 为空字符串，主题和发件人仍保留。`unreadCount` 是本人全部账号最近取得的远端收件箱未读数之和（`SUM(accounts.unread)`），不是缓存邮件行数，也不重复统计 Gmail 等服务的多个标签；没有邮箱或没有未读时为 0。客户端可用于更新应用数字角标，0 时清除角标；浏览器和操作系统不支持时可保持普通未读显示。每用户最多 10 个连接，每 25 秒保活；会话过期、注销或修改密码时关闭。连接断开后重新连接并刷新列表；当前没有持久事件重放承诺。同步 API 的 `{ok:true}` 表示已调度，不能据此认定已同步完成。
 
-状态变更事件 `change` 为 `{accountId,action,messageId?,message?,unreadCount}`，action 为 `message-updated`（已读 / 星标，附 messageId 和 MessageSummary）、`message-moved`（移动，附 messageId）、`accounts-updated`（账号添加 / 修改 / 删除 / 排序）或 `message-sent`（发信成功）。只向同一使用者全部在线会话广播；客户端刷新账号与已加载列表，并合并当前阅读邮件的元数据，避免重载正文。移动当前邮件后可返回列表。成功操作按当前缓存状态更新未读增减，再用远端完整 INBOX STATUS 校准；校准失败保留操作成功结果并安排重试。状态变更不触发新邮件系统通知。
+状态变更事件 `change` 为 `{accountId,action,messageId?,message?,unreadCount}`，action 为 `message-updated`（已读 / 星标，附 messageId 和 MessageSummary）、`message-moved`（移动，附 messageId）、`accounts-updated`（普通账号创建 / 修改 / 删除 / 排序）或 `message-sent`（发信成功）。Google OAuth 连接通过随后安排的 `sync` 事件刷新其他设备。只向同一使用者全部在线会话广播；客户端刷新账号与已加载列表，并合并当前阅读邮件的元数据，避免重载正文。移动当前邮件后可返回列表。成功操作按当前缓存状态更新未读增减，再用远端完整 INBOX STATUS 校准；校准失败保留操作成功结果并安排重试。状态变更不触发新邮件系统通知。
 
 同一登录账号的新邮件向全部已登记设备各自投递，不限于当前在线会话；每台设备需主动授权并登记订阅，登录不会自动开通系统通知。所有设备收到同批 notificationId，本地去重仅作用于该设备；某台失败独立重试，失效清理仅影响该订阅。离线页面重连 SSE 或回到前台时应刷新；不提供离线状态事件重放。
 
@@ -170,7 +170,7 @@ Google OAuth 邮箱只允许修改 `name` / `color`，修改地址、服务器�
 
 新邮件和测试通知的 Push JSON 均包含 `{title,body,url,tag,notificationId,unreadCount}`，其中 `notificationId` 为 UUID；正常新邮件与对应 SSE `mail` 事件使用相同 ID，测试通知独立生成 ID，进入相同的 Worker 展示 / 去重路径。两者均使用高优先级 `urgency:high`、最长 1 小时有效期（首次 `TTL:3600`，后台重试使用剩余 TTL）、`aes128gcm` 加密；topic 按本批通知 ID 派生，同批次可替换，不同批次不会相互覆盖。未读总数与 SSE 使用相同口径；测试不会制造未读邮件，也不会修改已有未读状态。INBOX 建立成功同步基线后，后续发现的新到邮件都会触发提醒，包括已被其他客户端标为已读的邮件；首次导入及 UIDVALIDITY 重置时不会将历史邮件作为新邮件提醒。
 
-正常通知 `title` 为最新到达邮件的主题，空主题显示“无主题”；`body` 为“发件人：纯文本摘要”，没有摘要显示“（无正文摘要）”，同批多封追加“另有 N 封新邮件”。前台 SSE 按相同规则展示；不含详情的旧调用仍使用计数通知。每批仅预取最新一封最多 16 KiB 的文字 MIME 部件，8 秒内完成或降级，不下载附件、不标为已读，不全量预取历史正文。有限摘要写入列表 summary，完整 body/source 仍按需加载。服务端重试队列暂存通知主题与摘要，按任务固定一小时期限清理；不写正文到日志或 Worker 去重库。
+正常通知 `title` 为最新到达邮件的主题，空主题显示无主题提示；`body` 为“发件人：纯文本摘要”，没有摘要显示“（无正文摘要）”，同批多封追加“另有 N 封新邮件”。前台 SSE 按相同规则展示；不含详情的旧调用仍使用计数通知。每批仅预取最新一封的文字 MIME 部件，解码后最多保留 16 KiB，8 秒内完成或降级，不下载附件、不标为已读，不全量预取历史正文；16 KiB 并非包含 MIME / 协议开销的网络流量上限。有限摘要写入列表 summary，完整 body/source 仍按需加载。服务端重试队列暂存通知主题与摘要，按任务固定一小时期限清理；不写正文到日志或 Worker 去重库。
 
 前台 SSE 与后台 Push 通过同一 Service Worker 展示，同一 `notificationId` 只提醒一次；普通通知按邮箱归组，并开启 `renotify`，后续不同批次仍再次提醒。Worker 仅持久保存通知 UUID 与展示时间，最多 128 条、保留 7 天，不保存邮件内容或订阅密钥；历史读取和写入各限 500 毫秒，异常或挂起后永久降级至当前 Worker 内存去重；迟到回调不恢复该 Worker 的持久存储，不会阻塞后续通知。需要 VAPID 公私钥、用户主动授权、HTTPS 和浏览器支持。登录及回到前台时会将已有且 VAPID 公钥匹配的浏览器订阅重新登记；没有订阅时不会自动请求权限或创建订阅。公钥变更需在设置重新开启提醒；设置页在服务端保存成功后才显示已开启。服务端记录正常新邮件推送的接受 / 失败状态、通知 ID 和订阅摘要，不记录完整 endpoint、授权密钥、邮件内容或服务商原始错误。Push 接受并不保证实际送达或显示。
 

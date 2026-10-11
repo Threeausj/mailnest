@@ -3115,7 +3115,7 @@
         "properties": {
           "title": {
             "type": "string",
-            "description": "正常新邮件为本批最大新增 UID 邮件的主题（最多 120 个 Unicode 字符），空主题显示无主题；旧调用无详情时兼容计数文案。测试使用测试标题。"
+            "description": "正常新邮件为本批最大新增 UID 邮件的主题（最多 120 个 Unicode 字符），空主题显示无主题提示；旧调用无详情时兼容计数文案。测试使用测试标题。"
           },
           "body": {
             "type": "string",
@@ -3170,7 +3170,7 @@
       },
       "MailNotificationDetails": {
         "type": "object",
-        "description": "本批新增 INBOX 邮件中最大 UID 的有限主题、正文摘要和发件人；每批仅预取该邮件最多 16 KiB 文字部件，不取附件。8 秒提取失败降级空 preview。按 Unicode 码点限长并归一空白，不缓存完整正文。",
+        "description": "本批新增 INBOX 邮件中最大 UID 的有限主题、正文摘要和发件人；每批仅预取该邮件的文字部件，解码后最多保留 16 KiB，不取附件；该上限不含 MIME / 协议的网络开销。8 秒提取失败降级空 preview。按 Unicode 码点限长并归一空白，不缓存完整正文。",
         "properties": {
           "subject": {
             "type": "string",
