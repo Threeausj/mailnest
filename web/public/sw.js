@@ -1,6 +1,6 @@
 const CACHE = '__MAILNEST_CACHE_VERSION__';
 const BUILT_ASSETS = /* __MAILNEST_PRECACHE_ASSETS__ */ [];
-const STATIC = ['/', '/icon.svg', '/icon-192.png', '/icon-512.png', '/manifest.webmanifest', ...BUILT_ASSETS];
+const STATIC = ['/', '/icon-blue-v2.svg', '/icon-blue-192-v2.png', '/icon-blue-512-v2.png', '/icon-blue-maskable-512-v2.png', '/notification-badge-v2.png', '/manifest.webmanifest', ...BUILT_ASSETS];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(STATIC)));
@@ -196,7 +196,7 @@ function queueMailNotification(data) {
     }
     const tag = mailNotificationTag(payload);
     await self.registration.showNotification(payload.title, {
-      body: payload.body, icon: '/icon-192.png', badge: '/icon-192.png', tag,
+      body: payload.body, icon: '/icon-blue-192-v2.png', badge: '/notification-badge-v2.png', tag,
       renotify: true, data: { url: '/' },
     });
     if (id) await recordShownNotification(id);

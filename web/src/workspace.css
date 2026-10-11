@@ -11,6 +11,11 @@
 .sidebar{overflow-y:auto;flex-shrink:0;scrollbar-width:thin;scrollbar-color:#d2ddce transparent}
 .sidebar>*{flex-shrink:0}
 .has-selection .workspace-header{display:flex}
+.list-load-more{display:flex;align-items:center;justify-content:center;gap:8px;min-height:28px;padding:8px 12px;font-size:11px;color:var(--muted);text-align:center}
+.list-load-more:empty{min-height:1px;padding:0}
+.list-load-more>span{overflow-wrap:anywhere}
+.list-load-more .spinner{font-size:11px}
+.mail-app .list-pagination{height:28px;min-height:28px;padding:0 12px;font-size:10px}
 @media(min-width:1151px){
   .has-selection .message-list-pane{position:sticky;top:var(--workspace-heading-height);align-self:flex-start;width:288px;min-width:288px;height:calc(100dvh - var(--workspace-heading-height));min-height:0}
   .has-selection .message-list-scroll{flex:1;min-height:0;overflow-y:auto}
@@ -20,4 +25,5 @@
   .workspace{--workspace-heading-height:98px;--bottom-nav-height:calc(56px + env(safe-area-inset-bottom))}
   .has-selection .mail-content{min-height:calc(100dvh - var(--workspace-heading-height) - var(--bottom-nav-height))}
   .mobile-bottom-nav{flex-shrink:0}
+  .mail-app .list-pagination{height:30px;min-height:30px}
 }

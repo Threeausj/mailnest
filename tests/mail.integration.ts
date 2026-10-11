@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { ImapFlow } from 'imapflow';
 import { buildApp } from '../server/src/app.js';
 import { loadConfig } from '../server/src/config.js';
+import type { MailNotificationDetails } from '../server/src/mail.js';
 
 const enabled = process.env.MAIL_TEST_ENABLED === 'true';
 test('TLS IMAP/SMTP: multi-account send, sync, MIME attachment, flags, move, configuration edits, and disconnect', { skip: !enabled, timeout: 90_000 }, async () => {
@@ -19,6 +20,11 @@ test('TLS IMAP/SMTP: multi-account send, sync, MIME attachment, flags, move, con
     ALLOW_PRIVATE_MAIL_HOSTS: 'true',
   }), background: false };
   const { app, mail, store } = await buildApp(config);
+  const notices: {accountId:string;count:number;details?:MailNotificationDetails}[] = [];
+  // Capture the real IMAP synchronization result without delivering external Push.
+  Object.defineProperty(mail,'notify',{value:async (_owner:string,accountId:string,count:number,_id:string,details?:MailNotificationDetails) => {
+    notices.push({accountId,count,details});
+  }});
   const host = process.env.MAIL_TEST_HOST || 'localhost';
   const imapPort = Number(process.env.MAIL_TEST_IMAP_PORT || '33993');
   const smtpPort = Number(process.env.MAIL_TEST_SMTP_PORT || '33465');
@@ -71,6 +77,11 @@ test('TLS IMAP/SMTP: multi-account send, sync, MIME attachment, flags, move, con
     assert.equal(unified.total, 2, 'BCC arrives in alpha inbox and TO arrives in beta inbox');
     const own = (await app.inject({url:`/api/v1/messages?folder=INBOX&accountId=${beta.id}&q=${encodeURIComponent(subject)}`,headers})).json();
     assert.equal(own.total, 1);
+    assert.match(own.messages[0].preview,/真正的 TLS SMTP/,'New mail obtains a bounded preview before opening its body');
+    const firstNotice = notices.find(notice => notice.accountId === beta.id && notice.details?.subject === subject);
+    assert.ok(firstNotice,'New INBOX arrivals include notification details');
+    assert.match(firstNotice.details!.preview,/真正的 TLS SMTP/);
+    assert.equal(firstNotice.details!.from.address,firstEmail);
     const id = own.messages[0].id;
     assert.equal(own.messages[0].hasAttachments, true);
     const detail = await app.inject({url:`/api/v1/messages/${id}`,headers});
@@ -122,6 +133,11 @@ test('TLS IMAP/SMTP: multi-account send, sync, MIME attachment, flags, move, con
       await mimeRemote.append('INBOX',Buffer.from(`From: alpha@${suffix}\r\nTo: beta@${suffix}\r\nSubject: ${plainSubject}\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=gb2312\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n=C4=E3=BA=C3 single-part body\r\n`));
     }finally{await mimeRemote.logout();}
     await app.inject({method:'POST',url:`/api/v1/accounts/${beta.id}/sync`,headers});await mail.waitForSync();
+    const plainNotice = notices.at(-1)!;
+    assert.equal(plainNotice.accountId,beta.id);
+    assert.equal(plainNotice.count,2);
+    assert.equal(plainNotice.details?.subject,plainSubject,'The latest arriving UID wins within a multi-message batch');
+    assert.match(plainNotice.details!.preview,/你好 single-part body/,'Notification MIME decoding preserves GB2312 and quoted-printable text');
     for(const [query,verify] of [[plainSubject,async(message:{text:string})=>assert.match(message.text,/你好 single-part body/)],[cidSubject,async(message:{text:string;attachments:{id:string;contentId:string;inline:boolean}[]})=>{
       assert.match(message.text,/CID image/);assert.equal(message.attachments[0].contentId,'fixture-image');assert.equal(message.attachments[0].inline,true);
       const image=await app.inject({url:`/api/v1/messages/${(message as {id?:string}).id}/attachments/${message.attachments[0].id}?inline=true`,headers});assert.equal(image.statusCode,200,image.body);assert.equal(image.headers['content-type'],'image/png');assert.deepEqual(image.rawPayload,png);
@@ -130,6 +146,31 @@ test('TLS IMAP/SMTP: multi-account send, sync, MIME attachment, flags, move, con
       const response=await app.inject({url:`/api/v1/messages/${result.messages[0].id}`,headers});assert.equal(response.statusCode,200,response.body);await verify(response.json().message);
     }
     assert.equal((store.db.prepare('SELECT COUNT(*) AS n FROM attachments').get() as {n:number}).n,0,'Inline images and downloads are not retained as binary database payloads');
+
+    // Attachment-first multipart mail must download only the HTML body part.
+    // Its old Date header must not make an earlier notification win.
+    const htmlSubject = `MailNest HTML preview ${Date.now()}`;
+    const htmlRemote = remote(secondEmail);await htmlRemote.connect();
+    try {
+      await htmlRemote.append('INBOX',Buffer.from(`From: Preview Team <alpha@${suffix}>\r\nTo: beta@${suffix}\r\nDate: Sat, 01 Jan 2000 00:00:00 +0000\r\nSubject: ${htmlSubject}\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=fixture-preview\r\n\r\n--fixture-preview\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename="unneeded.bin"\r\nContent-Transfer-Encoding: base64\r\n\r\n${Buffer.alloc(64*1024,65).toString('base64')}\r\n--fixture-preview\r\nContent-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n${Buffer.from('<html><body><style>.x{color:red}</style><h1>项目更新</h1><p>正文摘要 &amp; 已完成。</p></body></html>').toString('base64')}\r\n--fixture-preview--\r\n`));
+    } finally {await htmlRemote.logout();}
+    await app.inject({method:'POST',url:`/api/v1/accounts/${beta.id}/sync`,headers});await mail.waitForSync();
+    const htmlNotice = notices.at(-1)!;
+    assert.equal(htmlNotice.details?.subject,htmlSubject);
+    assert.match(htmlNotice.details!.preview,/项目更新/);
+    assert.match(htmlNotice.details!.preview,/正文摘要 & 已完成/);
+    assert.ok(!htmlNotice.details!.preview.includes('<') && !htmlNotice.details!.preview.includes('color:red'));
+    const htmlRow = (await app.inject({url:`/api/v1/messages?accountId=${beta.id}&q=${encodeURIComponent(htmlSubject)}`,headers})).json().messages[0];
+    const htmlCache = store.db.prepare('SELECT source,detail FROM messages WHERE id=?').get(htmlRow.id)!;
+    assert.equal(htmlCache.source,null);assert.equal(htmlCache.detail,null,'Notification preview does not eagerly cache the full HTML body or attachments');
+    const htmlCheck = remote(secondEmail);await htmlCheck.connect();
+    try {
+      await htmlCheck.mailboxOpen('INBOX',{readOnly:true});
+      const uids = await htmlCheck.search({header:{subject:htmlSubject}},{uid:true});
+      assert.ok(uids && uids.length);
+      const fetched = await htmlCheck.fetchOne(uids[0],{flags:true},{uid:true});
+      assert.ok(fetched && !fetched.flags?.has('\\Seen'),'Fetching a notification preview does not mark the message read');
+    }finally{await htmlCheck.logout();}
 
     const cachedAlphaIds = () => (store.db.prepare('SELECT id FROM messages WHERE account_id=? ORDER BY id').all(alpha.id) as {id:string}[]).map(row => row.id);
     const originalAlphaIds = cachedAlphaIds();

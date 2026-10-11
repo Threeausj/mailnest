@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
-import { ArrowRight, Bell, ChevronLeft, ChevronRight, Inbox, Mail, Menu, Paperclip, PenLine, Plus, RefreshCw, Reply, Search, Settings as SettingsIcon, ShieldCheck, Star, WifiOff, X } from 'lucide-react';
+import { ArrowRight, Bell, Inbox, Mail, Menu, Paperclip, PenLine, Plus, RefreshCw, Reply, Search, Settings as SettingsIcon, ShieldCheck, Star, WifiOff, X } from 'lucide-react';
 import { api, ApiError, errorText, patch, post } from './api';
 import { Brand, ErrorNotice, formatDate, Spinner, Toast } from './components';
 import AccountForm from './AccountForm';
@@ -14,6 +14,8 @@ import { PaneDivider, PaneDragShield, usePaneSizes } from './PaneResize';
 import { useAppHistory, withoutOverlay, type AppHistoryView } from './useAppHistory';
 import { useAppBadge } from './useAppBadge';
 import { ensureExistingPushSubscription } from './pushSubscription';
+import { mailNotificationText } from './mailNotification';
+import { useInfiniteMessages } from './useInfiniteMessages';
 import type { Account, Config, Message, MessageSummary, User } from './types';
 
 function EmptyIllustration() {
@@ -46,12 +48,12 @@ export default function App() {
   const [user, setUser] = useState<User | null>(null); const [authLoading, setAuthLoading] = useState(true); const [authError, setAuthError] = useState('');
   const [accounts, setAccounts] = useState<Account[]>([]); const [accountsLoading, setAccountsLoading] = useState(true); const [accountsError, setAccountsError] = useState('');
   const [config, setConfig] = useState<Config | null>(null); const [accountId, setAccountId] = useState('');
-  const [folder, setFolder] = useState('INBOX'); const [filter, setFilter] = useState('all'); const [query, setQuery] = useState(''); const [search, setSearch] = useState(''); const [page, setPage] = useState(1);
-  const [messages, setMessages] = useState<MessageSummary[]>([]); const [total, setTotal] = useState(0); const [messagesLoading, setMessagesLoading] = useState(false); const [messagesError, setMessagesError] = useState('');
-  const [loadedMessagesKey, setLoadedMessagesKey] = useState(''); const [messagesErrorKey, setMessagesErrorKey] = useState('');
+  const [folder, setFolder] = useState('INBOX'); const [filter, setFilter] = useState('all'); const [query, setQuery] = useState(''); const [search, setSearch] = useState('');
   const [badgeSnapshot, setBadgeSnapshot] = useState<{ owner: string; count: number } | null>(null);
   const unreadRevision = useRef(0);
   const [selectedId, setSelectedId] = useState(''); const [message, setMessage] = useState<Message | null>(null); const [detailLoading, setDetailLoading] = useState(false); const [detailError, setDetailError] = useState('');
+  const selectedMessage = useRef<Message | null>(null); selectedMessage.current = message;
+  const latestDetailSummary = useRef<MessageSummary | null>(null);
   const [revision, setRevision] = useState(0); const [detailRevision, setDetailRevision] = useState(0); const [syncing, setSyncing] = useState(false); const [actionBusy, setActionBusy] = useState(false);
   const [drawer, setDrawer] = useState(false); const [settings, setSettings] = useState(false); const [addAccount, setAddAccount] = useState(false); const [compose, setCompose] = useState(false); const [reply, setReply] = useState<Message | null>(null);
   const [forward, setForward] = useState<Message | null>(null);
@@ -65,12 +67,47 @@ export default function App() {
   const panes = usePaneSizes();
   const workspaceScroll = useRef<HTMLDivElement>(null);
   const overviewScroll = useRef(0);
-  const viewKey = JSON.stringify([accountId, folder, filter, search, page]);
-  const messagesKey = JSON.stringify([user?.id, viewKey]);
-  const hasLoadedMessages = loadedMessagesKey === messagesKey;
-  const currentMessagesError = messagesErrorKey === messagesKey ? messagesError : '';
+  const viewKey = JSON.stringify([accountId, folder, filter, search]);
+  const messageListScroll = useRef<HTMLDivElement>(null);
+  const loadMoreSentinel = useRef<HTMLDivElement>(null);
+  const listAnchor = useRef<{ key: string; id: string; top: number; scrollTop: number; root: HTMLDivElement } | null>(null);
+  const beforeListUpdate = useCallback(() => {
+    const root = panes.isDesktop ? messageListScroll.current : workspaceScroll.current;
+    if (!root || (!panes.isDesktop && selectedId)) return;
+    const viewport = root.getBoundingClientRect();
+    const covered = panes.isDesktop ? 0 : root.querySelector('.workspace-header')?.getBoundingClientRect().height || 0;
+    const row = Array.from(messageListScroll.current?.querySelectorAll<HTMLElement>('.message-row') || []).find(element => {
+      const bounds = element.getBoundingClientRect();
+      return bounds.bottom > viewport.top + covered && bounds.top < viewport.bottom;
+    });
+    if (row?.dataset.messageId) listAnchor.current = { key: viewKey, id: row.dataset.messageId, top: row.getBoundingClientRect().top, scrollTop: root.scrollTop, root };
+  }, [panes.isDesktop, selectedId, viewKey]);
+  const { messages, total, loaded: hasLoadedMessages, loading: messagesLoading, error: currentMessagesError,
+    loadingMore, moreError, hasMore, loadMore, setMessages } = useInfiniteMessages({
+      owner: user?.id || '', accountId, folder, filter, search, revision, beforeUpdate: beforeListUpdate,
+    });
   const listLoading = !hasLoadedMessages && (!currentMessagesError || messagesLoading);
   const visibleTotal = hasLoadedMessages ? total : 0;
+  useLayoutEffect(() => {
+    const anchor = listAnchor.current; listAnchor.current = null;
+    if (!anchor || anchor.key !== viewKey || Math.abs(anchor.root.scrollTop - anchor.scrollTop) > 1) return;
+    const row = Array.from(messageListScroll.current?.querySelectorAll<HTMLElement>('.message-row') || []).find(element => element.dataset.messageId === anchor.id);
+    if (row) anchor.root.scrollTop += row.getBoundingClientRect().top - anchor.top;
+  }, [messages, viewKey]);
+  useEffect(() => {
+    const root = panes.isDesktop ? messageListScroll.current : workspaceScroll.current;
+    const sentinel = loadMoreSentinel.current;
+    if (!root || !sentinel || !hasLoadedMessages || !hasMore || loadingMore || messagesLoading || moreError || (!panes.isDesktop && selectedId)) return;
+    const check = () => {
+      if (!sentinel.getClientRects().length || !root.clientHeight) return;
+      const bounds = sentinel.getBoundingClientRect(), viewport = root.getBoundingClientRect();
+      if (bounds.top <= viewport.bottom + 180 && bounds.bottom >= viewport.top) loadMore();
+    };
+    const observer = new IntersectionObserver(check, { root, rootMargin: '180px 0px' });
+    observer.observe(sentinel); root.addEventListener('scroll', check, { passive: true });
+    const frame = requestAnimationFrame(check);
+    return () => { observer.disconnect(); root.removeEventListener('scroll', check); cancelAnimationFrame(frame); };
+  }, [panes.isDesktop, selectedId, hasLoadedMessages, hasMore, loadingMore, messagesLoading, moreError, messages.length, loadMore]);
   const previousView = useRef(viewKey);
   const currentMessage = useRef(''); currentMessage.current = selectedId;
   const refresh = useCallback(() => setRevision((value) => value + 1), []);
@@ -89,22 +126,22 @@ export default function App() {
   const erroredAccounts = visibleAccounts.filter((account) => account.status === 'error' || account.status === 'partial');
 
   const historyView: AppHistoryView = {
-    accountId,folder,filter,page,selectedId,
+    accountId,folder,filter,page:1,selectedId,
     overlay:compose ? 'compose' : editingAccount ? 'edit-account' : addAccount ? 'add-account' : settings ? 'settings' : drawer ? 'navigation' : pwaInstall.guideOpen ? 'install' : '',
     editingAccountId:editingAccount?.id || '',composeKind:compose && forward ? 'forward' : compose && reply ? 'reply' : 'new',composeMessageId:compose ? (forward || reply)?.id || '' : '',
   };
   useAppHistory({
     owner:user?.id || '',view:historyView,
     onRestore:(view) => {
-      let restored = view;
+      let restored = {...view,page:1};
       const editing = view.overlay === 'edit-account' ? accounts.find(account => account.id === view.editingAccountId) : undefined;
       if (view.overlay === 'edit-account' && !editing) restored = {...withoutOverlay(view),overlay:'settings'};
       if (view.overlay === 'compose' && view.composeKind !== 'new' && (view.composeKind === 'reply' ? reply?.id : forward?.id) !== view.composeMessageId) restored = withoutOverlay(view);
       // Installation prompts cannot be replayed by browser Forward.
       if (view.overlay === 'install') restored = withoutOverlay(view);
       if (!selectedId && restored.selectedId) overviewScroll.current = workspaceScroll.current?.scrollTop || 0;
-      if (accountId !== restored.accountId || folder !== restored.folder || filter !== restored.filter || page !== restored.page) { setQuery(''); setSearch(''); }
-      setAccountId(restored.accountId); setFolder(restored.folder); setFilter(restored.filter); setPage(restored.page); setSelectedId(restored.selectedId);
+      if (accountId !== restored.accountId || folder !== restored.folder || filter !== restored.filter) { setQuery(''); setSearch(''); }
+      setAccountId(restored.accountId); setFolder(restored.folder); setFilter(restored.filter); setSelectedId(restored.selectedId);
       setDrawer(restored.overlay === 'navigation'); setSettings(restored.overlay === 'settings'); setAddAccount(restored.overlay === 'add-account');
       setEditingAccount(restored.overlay === 'edit-account' ? editing || null : null);
       setCompose(restored.overlay === 'compose');
@@ -143,7 +180,7 @@ export default function App() {
   }, []);
   useEffect(() => { void checkSession(); }, [checkSession]);
   useEffect(() => {
-    const onExpired = () => { setUser(null); setAccounts([]); setAccountsLoading(true); setConfig(null); setBadgeSnapshot(null); setLoadedMessagesKey(''); setMessagesErrorKey(''); setMessages([]); setMessage(null); setSettings(false); setCompose(false); setAddAccount(false); setEditingAccount(null); setSelectedId(''); setToast('登录已失效，请重新登录。'); };
+    const onExpired = () => { setUser(null); setAccounts([]); setAccountsLoading(true); setConfig(null); setBadgeSnapshot(null); setMessage(null); setSettings(false); setCompose(false); setAddAccount(false); setEditingAccount(null); setSelectedId(''); setToast('登录已失效，请重新登录。'); };
     const onOnline = () => { setOnline(true); refresh(); }; const onOffline = () => setOnline(false);
     window.addEventListener('session-expired', onExpired); window.addEventListener('online', onOnline); window.addEventListener('offline', onOffline);
     return () => { window.removeEventListener('session-expired', onExpired); window.removeEventListener('online', onOnline); window.removeEventListener('offline', onOffline); };
@@ -155,7 +192,7 @@ export default function App() {
   useEffect(() => {
     const nextSearch = query.trim();
     if (nextSearch === search) return;
-    const timer = setTimeout(() => { setSearch(nextSearch); setPage(1); setSelectedId(''); }, 300);
+    const timer = setTimeout(() => { setSearch(nextSearch); setSelectedId(''); }, 300);
     return () => clearTimeout(timer);
   }, [query, search]);
   useEffect(() => {
@@ -193,27 +230,19 @@ export default function App() {
       // A newer SSE count takes precedence over an older in-flight snapshot.
       if (badgeVersion === unreadRevision.current) setBadgeSnapshot({ owner: user.id, count: result.accounts.reduce((sum, account) => sum + account.unread, 0) });
       setAccounts(result.accounts); if (accountId && !result.accounts.some((account) => account.id === accountId)) changeView('INBOX', 'all', '');
+      if (selectedMessage.current && !result.accounts.some(account => account.id === selectedMessage.current!.accountId)) setSelectedId('');
     }).catch((error) => { if (error.name !== 'AbortError') setAccountsError(errorText(error)); }).finally(() => { if (!controller.signal.aborted) setAccountsLoading(false); });
     return () => controller.abort();
   }, [user, revision, accountId]);
   useEffect(() => {
-    if (!user) return;
-    const controller = new AbortController(); setMessagesLoading(true); setMessagesError(''); setMessagesErrorKey(messagesKey);
-    const params = new URLSearchParams({ folder, filter, page: String(page), pageSize: '30' });
-    if (accountId) params.set('accountId', accountId); if (search) params.set('q', search);
-    api<{ messages: MessageSummary[]; total: number }>(`/messages?${params}`, { signal: controller.signal }).then((result) => {
-      if (controller.signal.aborted) return;
-      setMessages(result.messages); setTotal(result.total); setLoadedMessagesKey(messagesKey);
-    }).catch((error) => { if (!controller.signal.aborted) { setMessagesError(errorText(error)); setMessagesErrorKey(messagesKey); } }).finally(() => { if (!controller.signal.aborted) setMessagesLoading(false); });
-    return () => controller.abort();
-  }, [user, accountId, folder, filter, search, page, revision, messagesKey]);
-  useEffect(() => {
     if (!user || !selectedId) { setMessage(null); return; }
-    const controller = new AbortController(); setDetailLoading(true); setDetailError(''); setMessage(null);
+    const controller = new AbortController(); latestDetailSummary.current = null; setDetailLoading(true); setDetailError(''); setMessage(null);
     api<{ message: Message }>(`/messages/${encodeURIComponent(selectedId)}`, { signal: controller.signal }).then(async ({ message: value }) => {
       if (controller.signal.aborted) return;
-      setMessage(value);
-      if (value.unread) {
+      const latest = latestDetailSummary.current;
+      const displayed = latest?.id === value.id ? { ...value, ...latest } : value;
+      setMessage(displayed);
+      if (displayed.unread) {
         try {
           const updated = await patch<{ message: MessageSummary }>(`/messages/${encodeURIComponent(selectedId)}`, { unread: false });
           if (!controller.signal.aborted) { setMessage((current) => current?.id === updated.message.id ? { ...current, ...updated.message } : current); setMessages((previous) => previous.map((item) => item.id === updated.message.id ? updated.message : item)); refresh(); }
@@ -222,6 +251,13 @@ export default function App() {
     }).catch((error) => { if (error.name !== 'AbortError') setDetailError(errorText(error)); }).finally(() => { if (!controller.signal.aborted) setDetailLoading(false); });
     return () => controller.abort();
   }, [user, selectedId, detailRevision, refresh]);
+  useEffect(() => {
+    const summary = messages.find(item => item.id === selectedId);
+    if (summary) {
+      latestDetailSummary.current = summary;
+      setMessage(previous => previous?.id === summary.id ? { ...previous, ...summary } : previous);
+    }
+  }, [messages]);
   useEffect(() => {
     if (!user) return;
     const source = new EventSource('/api/v1/events');
@@ -235,6 +271,23 @@ export default function App() {
       } catch { /* Older servers and invalid events are handled by polling. */ }
     };
     const onSync = (event: Event) => { updateUnread(event); refresh(); };
+    const onChange = (event: Event) => {
+      updateUnread(event);
+      try {
+        const data = JSON.parse((event as MessageEvent).data);
+        if (data.action === 'message-updated' && data.message?.id) {
+          const updated = data.message as MessageSummary;
+          if (currentMessage.current === updated.id) latestDetailSummary.current = updated;
+          setMessages(previous => previous.map(item => item.id === updated.id ? { ...item, ...updated } : item));
+          // A summary update must retain the already rendered body and iframe.
+          setMessage(previous => previous?.id === updated.id ? { ...previous, ...updated } : previous);
+        } else if (data.action === 'message-moved' && typeof data.messageId === 'string') {
+          setMessages(previous => previous.filter(item => item.id !== data.messageId));
+          if (currentMessage.current === data.messageId) setSelectedId('');
+        }
+      } catch { /* Refresh repairs missing or older event payloads. */ }
+      refresh();
+    };
     const onMail = (event: Event) => {
       updateUnread(event);
       refresh();
@@ -246,25 +299,25 @@ export default function App() {
           navigator.serviceWorker?.getRegistration().then((registration) => {
             // The worker deduplicates this SSE event and its matching Web Push.
             registration?.active?.postMessage({ type: 'MAIL_NOTIFICATION', payload: {
-              title: '邮屿 · 新邮件', body: `你收到 ${count} 封新邮件，打开邮屿查看。`,
+              ...mailNotificationText(count, data.notification),
               accountId: data.accountId, notificationId: data.notificationId, unreadCount: data.unreadCount,
             } });
           }).catch(() => {});
         }
       } catch { /* A refresh still handles an invalid event payload. */ }
     };
-    source.addEventListener('ready', updateUnread); source.addEventListener('mail', onMail); source.addEventListener('sync', onSync);
+    source.addEventListener('ready', onSync); source.addEventListener('mail', onMail); source.addEventListener('sync', onSync); source.addEventListener('change', onChange);
     const interval = window.setInterval(() => { if (navigator.onLine && !document.hidden) refresh(); }, Math.max(config?.pollingInterval || 60, 30) * 1000);
     const onVisible = () => { if (!document.hidden) refresh(); }; document.addEventListener('visibilitychange', onVisible);
     return () => { source.close(); clearInterval(interval); document.removeEventListener('visibilitychange', onVisible); };
-  }, [user, config?.pollingInterval, refresh]);
+  }, [user, config?.pollingInterval, refresh, setMessages]);
   useEffect(() => {
     if (!drawer) return;
     const keydown = (event: KeyboardEvent) => { if (event.key === 'Escape') setDrawer(false); };
     document.addEventListener('keydown', keydown); return () => document.removeEventListener('keydown', keydown);
   }, [drawer]);
 
-  function changeView(nextFolder: string, nextFilter = 'all', nextAccount = accountId) { setFolder(nextFolder); setFilter(nextFilter); setAccountId(nextAccount); setQuery(''); setSearch(''); setPage(1); setSelectedId(''); setDrawer(false); }
+  function changeView(nextFolder: string, nextFilter = 'all', nextAccount = accountId) { setFolder(nextFolder); setFilter(nextFilter); setAccountId(nextAccount); setQuery(''); setSearch(''); setSelectedId(''); setDrawer(false); }
   function openMessage(id: string) {
     if (!selectedId) overviewScroll.current = workspaceScroll.current?.scrollTop || 0;
     setSelectedId(id);
@@ -299,7 +352,7 @@ export default function App() {
           try { await subscription.unsubscribe(); } catch { /* Server-side session revocation takes priority. */ }
         }
       } catch { /* Browser notification cleanup must never block logout. */ }
-      await post('/auth/logout'); setUser(null); setSettings(false); setAccounts([]); setBadgeSnapshot(null); setLoadedMessagesKey(''); setMessagesErrorKey(''); setMessages([]); setMessage(null); setSelectedId(''); setAccountId(''); setConfig(null); setQuery(''); setAccountsLoading(true); setCompose(false); setAddAccount(false);
+      await post('/auth/logout'); setUser(null); setSettings(false); setAccounts([]); setBadgeSnapshot(null); setMessage(null); setSelectedId(''); setAccountId(''); setConfig(null); setQuery(''); setAccountsLoading(true); setCompose(false); setAddAccount(false);
     } catch (error) { setToast(errorText(error)); }
   }
   function openCompose(replyTo: Message | null = null) { setForward(null); setReply(replyTo); setCompose(true); }
@@ -350,15 +403,15 @@ export default function App() {
         </div></div>
       </header>
       {!online && <div className="offline-banner" role="status"><WifiOff size={16} /> 你现在处于离线状态。连接网络后即可读取和发送邮件。</div>}{accountsError && <div className="workspace-notice"><ErrorNotice onRetry={refresh}>{accountsError}</ErrorNotice></div>}{erroredAccounts.length > 0 && <div className="sync-error-banner" role="status"><div>{erroredAccounts.map((account) => <p key={account.id}><strong>{account.name}</strong> {account.status === 'partial' ? '部分目录未同步' : '连接异常'}{account.error ? `：${account.error}` : '，稍后重试同步。'}</p>)}</div><button onClick={() => setSettings(true)}>查看并处理 <ArrowRight size={13} /></button></div>}
-      <div className="mail-content"><section id="mail-message-list" className="message-list-pane" aria-label="邮件列表"><div className="list-toolbar"><div className="list-filter" role="tablist" aria-label="邮件筛选"><button role="tab" aria-selected={filter === 'all'} className={filter === 'all' ? 'active' : ''} onClick={() => { setFilter('all'); setPage(1); setSelectedId(''); }}>全部</button><button role="tab" aria-selected={filter === 'unread'} className={filter === 'unread' ? 'active' : ''} onClick={() => { setFilter('unread'); setPage(1); setSelectedId(''); }}>未读<span>{activeAccount?.unread ?? unread}</span></button><button role="tab" aria-selected={filter === 'starred'} className={filter === 'starred' ? 'active' : ''} onClick={() => { setFilter('starred'); setPage(1); setSelectedId(''); }}>星标</button></div><span className="list-count">{visibleTotal} 封</span></div>
-        {hasLoadedMessages && currentMessagesError && <div className="list-refresh-error"><span role="status">{currentMessagesError} · 当前仍显示上次加载的邮件。</span><button type="button" onClick={refresh}>重试</button></div>}<div className="message-list-scroll" aria-busy={listLoading}>{listLoading ? <div className="list-loading"><Spinner label="正在获取邮件…" /></div> : !hasLoadedMessages && currentMessagesError ? <div className="list-error"><ErrorNotice onRetry={refresh}>{currentMessagesError}</ErrorNotice></div> : messages.length ? <div className="message-list">{messages.map((item) => {
+      <div className="mail-content"><section id="mail-message-list" className="message-list-pane" aria-label="邮件列表"><div className="list-toolbar"><div className="list-filter" role="tablist" aria-label="邮件筛选"><button role="tab" aria-selected={filter === 'all'} className={filter === 'all' ? 'active' : ''} onClick={() => { setFilter('all'); setSelectedId(''); }}>全部</button><button role="tab" aria-selected={filter === 'unread'} className={filter === 'unread' ? 'active' : ''} onClick={() => { setFilter('unread'); setSelectedId(''); }}>未读<span>{activeAccount?.unread ?? unread}</span></button><button role="tab" aria-selected={filter === 'starred'} className={filter === 'starred' ? 'active' : ''} onClick={() => { setFilter('starred'); setSelectedId(''); }}>星标</button></div><span className="list-count">{visibleTotal} 封</span></div>
+        {hasLoadedMessages && currentMessagesError && <div className="list-refresh-error"><span role="status">{currentMessagesError} · 当前仍显示上次加载的邮件。</span><button type="button" onClick={refresh}>重试</button></div>}<div className="message-list-scroll" ref={messageListScroll} aria-busy={listLoading}>{listLoading ? <div className="list-loading"><Spinner label="正在获取邮件…" /></div> : !hasLoadedMessages && currentMessagesError ? <div className="list-error"><ErrorNotice onRetry={refresh}>{currentMessagesError}</ErrorNotice></div> : messages.length ? <div className="message-list">{messages.map((item) => {
           const account = accounts.find((value) => value.id === item.accountId); const sender = folder === 'sent' ? item.to[0]?.name || item.to[0]?.address || '收件人' : item.from.name || item.from.address;
-          return <div key={item.id} className={`message-row ${item.unread ? 'unread' : ''} ${selectedId === item.id ? 'selected' : ''}`}><button className="message-row-main" aria-label={`打开邮件：${item.subject || '无主题'}`} onClick={() => openMessage(item.id)}><div className="message-row-top">
+          return <div key={item.id} data-message-id={item.id} className={`message-row ${item.unread ? 'unread' : ''} ${selectedId === item.id ? 'selected' : ''}`}><button className="message-row-main" aria-label={`打开邮件：${item.subject || '无主题'}`} onClick={() => openMessage(item.id)}><div className="message-row-top">
             <span className="sender" title={sender}>{sender}</span>
             <span className="message-row-meta"><span className="mailbox-label" title={account?.email}><i style={{ backgroundColor: account?.color || '#729184' }} /><span>{account?.name || '邮箱'}</span></span><time dateTime={item.date}>{formatDate(item.date)}</time></span>
           </div><div className="message-row-content"><div className="message-row-subject">{item.unread && <i className="unread-dot" />}<strong>{item.subject || '（无主题）'}</strong>{item.hasAttachments && <Paperclip size={13} />}</div><p className="message-preview">{item.preview || '（无邮件摘要）'}</p></div></button><button className={`message-star icon-button ${item.starred ? 'is-starred' : ''}`} aria-label={`${item.starred ? '取消星标' : '标记星标'}：${item.subject || '无主题'}`} aria-pressed={item.starred} disabled={actionBusy} onClick={() => void updateMessage(item, { starred: !item.starred })}><Star size={15} fill={item.starred ? 'currentColor' : 'none'} /></button></div>;
-        })}</div> : <div className="list-empty"><Inbox size={30} strokeWidth={1.2} /><h3>{search ? '没有找到相关邮件' : !accounts.length ? '还没有连接邮箱' : filter === 'unread' ? '未读邮件已清空' : filter === 'starred' ? '这里会留住重要的邮件' : '收件箱很安静'}</h3><p>{search ? '试试其他关键词，或查看所有邮箱。' : !accounts.length ? '添加邮箱后，邮件会出现在这里。' : '同步完成后的邮件会自动显示在这里。'}</p>{!accounts.length && <button className="text-button" onClick={() => setAddAccount(true)}>连接邮箱 <ArrowRight size={14} /></button>}</div>}</div>
-        <div className="list-pagination"><span>{visibleTotal ? `${(page - 1) * 30 + 1}–${Math.min(page * 30, visibleTotal)} / ${visibleTotal}` : '没有邮件'} </span><div><button className="icon-button" aria-label="上一页" disabled={page <= 1 || listLoading} onClick={() => { setPage(page - 1); setSelectedId(''); }}><ChevronLeft size={17} /></button><button className="icon-button" aria-label="下一页" disabled={page * 30 >= visibleTotal || listLoading} onClick={() => { setPage(page + 1); setSelectedId(''); }}><ChevronRight size={17} /></button></div></div>
+        })}</div> : <div className="list-empty"><Inbox size={30} strokeWidth={1.2} /><h3>{search ? '没有找到相关邮件' : !accounts.length ? '还没有连接邮箱' : filter === 'unread' ? '未读邮件已清空' : filter === 'starred' ? '这里会留住重要的邮件' : '收件箱很安静'}</h3><p>{search ? '试试其他关键词，或查看所有邮箱。' : !accounts.length ? '添加邮箱后，邮件会出现在这里。' : '同步完成后的邮件会自动显示在这里。'}</p>{!accounts.length && <button className="text-button" onClick={() => setAddAccount(true)}>连接邮箱 <ArrowRight size={14} /></button>}</div>}<div ref={loadMoreSentinel} className="list-load-more" aria-live="polite">{loadingMore ? <Spinner label="正在加载更多邮件…" /> : moreError ? <><span>{moreError}</span><button type="button" className="text-button" onClick={() => loadMore(true)}>重试加载</button></> : hasLoadedMessages && messages.length > 0 && !hasMore ? <span>已显示全部邮件</span> : null}</div></div>
+        <div className="list-pagination"><span>{visibleTotal ? `已加载 ${messages.length} / 共 ${visibleTotal} 封` : '没有邮件'}</span></div>
       </section>
       <PaneDivider controller={panes} kind="list" />
       <main className="reader-pane" aria-label="邮件内容">{!selectedId ? <div className="reader-welcome"><div className="welcome-date">{new Intl.DateTimeFormat('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' }).format(new Date())}</div><div className="reader-welcome-main"><EmptyIllustration /><span className="eyebrow">A LITTLE SPACE, A LITTLE CLARITY</span><h2>{!accounts.length ? '欢迎来到，你的邮屿。' : '留一点空间，给重要的来信。'}</h2><p>{!accounts.length ? <>连接你的邮箱，将工作与生活的来信汇集于此。<br />从此，收件更从容。</> : <>从左侧选择一封邮件，开始阅读。<br />所有来信，都在这里等你。</>}</p><button className="button primary" onClick={() => accounts.length ? openCompose() : setAddAccount(true)}>{accounts.length ? <><PenLine size={17} /> 写一封邮件</> : <><Plus size={17} /> 连接第一个邮箱</>}</button>{!accounts.length && <span className="supported-mail">支持 Gmail 及 IMAP / SMTP 邮箱</span>}</div><div className="welcome-footer"><span><ShieldCheck size={15} /> 私密连接 · 安心阅读</span><span>MAKE ROOM FOR WHAT MATTERS</span></div></div> : <>{detailLoading ? <div className="reader-loading"><Spinner label="正在打开邮件…" /></div> : detailError ? <div className="reader-loading"><ErrorNotice onRetry={() => setDetailRevision((value) => value + 1)}>{detailError}</ErrorNotice></div> : message && <article className="message-detail"><MessageHeader message={message} account={accounts.find((account) => account.id === message.accountId)} folderLabel={activeFolder.label} busy={actionBusy} onStar={() => void updateMessage(message, { starred: !message.starred })} /><MailBody key={message.id} message={message} /><div className="reply-actions"><button className="button secondary" onClick={() => openCompose(message)}><Reply size={17} /> 回复邮件</button><span className="small-muted">使用当前邮箱回复</span></div></article>}</>}</main>

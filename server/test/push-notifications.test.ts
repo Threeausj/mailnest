@@ -11,10 +11,11 @@ import webPush from 'web-push';
 import {buildApp} from '../src/app.js';
 import {loadConfig} from '../src/config.js';
 import {hashToken} from '../src/security.js';
+import type {MailNotificationDetails} from '../src/mail.js';
 
 type Project=Awaited<ReturnType<typeof buildApp>>;
 type SendParameters=Parameters<typeof webPush.sendNotification>;
-type MailHooks={notify:(userId:string,accountId:string,count:number,notificationId?:string)=>Promise<void>;emit:(userId:string,event:string,data:unknown)=>void};
+type MailHooks={notify:(userId:string,accountId:string,count:number,notificationId?:string,details?:MailNotificationDetails)=>Promise<void>;stageNotification:(userId:string,accountId:string,count:number,notificationId:string,details?:MailNotificationDetails)=>void;emit:(userId:string,event:string,data:unknown)=>void};
 interface Delivery {calls:SendParameters[];error?:unknown;wait?:Promise<void>;onSend?:()=>void}
 const origin='http://localhost:5173';
 const password='NotificationTest2026!';
@@ -144,6 +145,49 @@ test('normal mail notifications include the total inbox unread count and keep ex
   assert.equal(project.store.db.prepare('SELECT COUNT(*) AS n FROM push_subscriptions WHERE user_id=?').get(userId)!.n,0);assert.ok(project.store.db.prepare('SELECT endpoint FROM push_subscriptions WHERE endpoint=?').get(outside));
 }));
 
+test('normal mail notifications show the latest subject, sender and plain-text preview with a multi-mail count',async()=>fixture(async(project,userId,_cookie,delivery)=>{
+  const account=seedAccount(project,userId,5),selected=endpoint('content-preview');seedSubscription(project,userId,selected);
+  const hooks=project.mail as unknown as MailHooks,notificationId=randomUUID();
+  const details:MailNotificationDetails={subject:' 本周项目进度\r\n汇总 ',preview:' 设计已完成。\n请查收附件，明天一起确认。 ',from:{name:' 林同学\t ',address:'sender@example.com'}};
+  await hooks.notify(userId,account,3,notificationId,details);
+  assert.equal(delivery.calls.length,1);assertDeliveryOptions(delivery.calls[0]);
+  assert.deepEqual(payload(delivery.calls[0]),{title:'本周项目进度 汇总',body:'林同学：设计已完成。 请查收附件，明天一起确认。 · 另有 2 封新邮件',url:`/?account=${account}`,tag:`mail-${account}`,notificationId,unreadCount:5});
+  assert.equal(String(delivery.calls[0][1]).includes('sender@example.com'),false,'prefer the friendly sender name');
+  await hooks.notify(userId,account,1,randomUUID(),{subject:'直接回复',preview:'邮件内容',from:{name:'',address:'sender@example.com'}});
+  assert.equal(payload(delivery.calls[1]).body,'sender@example.com：邮件内容');
+}));
+
+test('empty subject, sender and preview retain useful fallback text while explicit tests keep their semantics',async()=>fixture(async(project,userId,cookie,delivery)=>{
+  const account=seedAccount(project,userId,1),selected=endpoint('empty-preview');seedSubscription(project,userId,selected);
+  const hooks=project.mail as unknown as MailHooks;
+  await hooks.notify(userId,account,1,randomUUID(),{subject:' \r\n',preview:'\u0000\t',from:{name:' ',address:''}});
+  assert.equal(payload(delivery.calls[0]).title,'无主题');assert.equal(payload(delivery.calls[0]).body,'未知发件人：（无正文摘要）');
+  await hooks.notify(userId,account,2);assert.equal(payload(delivery.calls[1]).title,'MailNest 新邮件');assert.equal(payload(delivery.calls[1]).body,'有 2 封新邮件等待查看');
+  const response=await sendTest(project,cookie,selected);assert.equal(response.statusCode,200);assert.equal(payload(delivery.calls[2]).title,'MailNest 测试通知');assert.equal(payload(delivery.calls[2]).body,'邮件提醒测试成功。');
+}));
+
+test('long Unicode previews fit the Web Push payload budget and never cut an emoji surrogate pair',async()=>fixture(async(project,userId,_cookie,delivery)=>{
+  const account=seedAccount(project,userId,1);seedSubscription(project,userId,endpoint('unicode-budget'));
+  const hooks=project.mail as unknown as MailHooks;
+  await hooks.notify(userId,account,200,randomUUID(),{subject:'主题🚀'.repeat(1000),preview:'正文😀\\"'.repeat(1000),from:{name:'寄件人🎈'.repeat(1000),address:'synthetic@example.com'}});
+  const notice=payload(delivery.calls[0]);assert.equal(Array.from(notice.title).length,120);assert.ok(notice.title.endsWith('…'));assert.ok(notice.body.includes(' · 另有 199 封新邮件'));
+  assert.ok(Buffer.byteLength(String(delivery.calls[0][1]),'utf8')<3000,'leave space for Web Push encryption overhead below 4 KB');
+  for(const value of [notice.title,notice.body])assert.equal(value.isWellFormed(),true);
+  assert.equal(notice.body.includes('\n'),false);assert.equal(notice.body.includes('\u0000'),false);
+}));
+
+test('transactionally staged previews survive retries unchanged while IDs deduplicate and current unread badges refresh',async()=>fixture(async(project,userId,_cookie,delivery)=>{
+  const account=seedAccount(project,userId,4);seedSubscription(project,userId,endpoint('durable-preview'));
+  const hooks=project.mail as unknown as MailHooks,notificationId=randomUUID();
+  const details:MailNotificationDetails={subject:'已持久化的主题',preview:'这段摘要只生成一次。',from:{name:'联系人',address:'synthetic@example.com'}};
+  project.store.db.exec('BEGIN IMMEDIATE');hooks.stageNotification(userId,account,1,notificationId,details);project.store.db.exec('COMMIT');assert.equal(delivery.calls.length,0);
+  const staged=project.store.db.prepare('SELECT payload FROM push_deliveries WHERE notification_id=?').get(notificationId) as {payload:string};assert.equal(JSON.parse(staged.payload).title,details.subject);
+  delivery.error={statusCode:503};await hooks.notify(userId,account,1,notificationId,{...details,subject:'不会覆盖入队的内容'});assert.equal(payload(delivery.calls[0]).title,details.subject);
+  project.store.db.prepare('UPDATE accounts SET unread=1 WHERE id=?').run(account);project.store.db.prepare('UPDATE push_deliveries SET next_attempt_at=0').run();delete delivery.error;await project.pushQueue.flush();
+  assert.equal(delivery.calls.length,2);assert.equal(payload(delivery.calls[1]).title,details.subject);assert.equal(payload(delivery.calls[1]).body,'联系人：这段摘要只生成一次。');assert.equal(payload(delivery.calls[1]).unreadCount,1);assert.equal(payload(delivery.calls[1]).notificationId,notificationId);
+  await hooks.notify(userId,account,1,notificationId,details);assert.equal(delivery.calls.length,2);
+}));
+
 test('provider topics are stable for one notification batch and distinct for later mail and explicit tests',async()=>fixture(async(project,userId,cookie,delivery)=>{
   const account=seedAccount(project,userId,2),selected=endpoint('batch-topics');seedSubscription(project,userId,selected);
   const hooks=project.mail as unknown as MailHooks,firstId=randomUUID(),nextId=randomUUID();
@@ -184,6 +228,8 @@ test('SSE ready and account updates include the current scoped unread total with
     project.store.db.prepare('UPDATE accounts SET unread=? WHERE id=?').run(1,first);
     hooks.emit(userId,'sync',{accountId:first,status:'connected'});assert.deepEqual(await nextEvent(),{event:'sync',data:{accountId:first,status:'connected',unreadCount:5}});
     const notificationId=randomUUID();hooks.emit(userId,'mail',{accountId:second,count:2,notificationId});assert.deepEqual(await nextEvent(),{event:'mail',data:{accountId:second,count:2,notificationId,unreadCount:5}});
+    const notification:MailNotificationDetails={subject:'统一邮件主题',preview:'统一正文摘要',from:{name:'SSE 联系人',address:'synthetic@example.com'}};
+    hooks.emit(userId,'mail',{accountId:second,count:1,notificationId,notification});assert.deepEqual(await nextEvent(),{event:'mail',data:{accountId:second,count:1,notificationId,notification,unreadCount:5}});
     project.store.db.prepare('DELETE FROM accounts WHERE user_id=?').run(userId);hooks.emit(userId,'sync',{accountId:second,status:'connected'});assert.equal((await nextEvent()).data.unreadCount,0);
   }finally{await reader.cancel();}
 }));

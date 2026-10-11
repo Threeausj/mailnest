@@ -381,8 +381,11 @@ test('unified and individual mailbox groups keep real folders, filters and navig
   await expect(page.getByRole('button',{name:'打开邮件：个人已发送',exact:true})).toHaveCount(0);
   await expect(page.getByRole('button',{name:'打开邮件：工作已发送 1',exact:true})).toBeVisible();
   expect(requests.at(-1)).toMatchObject({accountId:'alpha',folder:'[Work]/Sent',filter:'all',q:null,page:1});
-  await page.getByRole('button',{name:'下一页',exact:true}).click();
-  await expect(page.getByRole('button',{name:'打开邮件：工作已发送 31',exact:true})).toBeVisible();
+  await page.getByRole('button',{name:'打开邮件：工作已发送 30',exact:true}).scrollIntoViewIfNeeded();
+  const nextBatchMessage = page.getByRole('button',{name:'打开邮件：工作已发送 31',exact:true});
+  await expect(nextBatchMessage).toHaveCount(1);
+  await nextBatchMessage.scrollIntoViewIfNeeded();
+  await expect(nextBatchMessage).toBeVisible();
   expect(requests.at(-1)?.page).toBe(2);
   await page.getByRole('button',{name:'打开邮件：工作已发送 31',exact:true}).click();
   await expect(page.getByRole('heading',{name:'工作已发送 31',exact:true})).toBeVisible();
@@ -393,7 +396,7 @@ test('unified and individual mailbox groups keep real folders, filters and navig
   await expect(page.getByLabel('搜索邮件',{exact:true})).toHaveValue('');
   await expect(page.getByRole('button',{name:'打开邮件：个人已发送',exact:true})).toBeVisible();
   await expect(page.getByRole('heading',{name:'工作已发送 31',exact:true})).toHaveCount(0);
-  await expect(page.getByRole('button',{name:'上一页',exact:true})).toBeDisabled();
+  await expect(page.getByRole('button',{name:'上一页',exact:true})).toHaveCount(0);
   expect(requests.at(-1)).toMatchObject({accountId:'beta',folder:'Sent Items',filter:'all',q:null,page:1});
 
   await choose(work,'项目');
@@ -439,7 +442,7 @@ test('unified and individual mailbox groups keep real folders, filters and navig
   await expect(page.getByRole('button',{name:'打开邮件：工作收件',exact:true})).toBeVisible();
   await expect(page.getByRole('button',{name:'打开邮件：个人收件',exact:true})).toHaveCount(0);
   await expect(page.getByRole('heading',{name:'个人已发送',exact:true})).toHaveCount(0);
-  await expect(page.getByRole('button',{name:'上一页',exact:true})).toBeDisabled();
+  await expect(page.getByRole('button',{name:'上一页',exact:true})).toHaveCount(0);
   await expect(sidebar.locator('nav[aria-label="个人邮箱文件夹"]')).toHaveCount(0);
   expect(requests.at(-1)).toMatchObject({accountId:null,folder:'INBOX',filter:'all',q:null,page:1});
   await noHorizontalOverflow(page);
@@ -1569,13 +1572,16 @@ test('foreground application badges follow the total unread count across mailbox
   holdNextAccounts = true;
   await page.evaluate(() => (window as any).__emitMailboxEvent('sync',{}));
   await expect.poll(() => delayedAccountsStarted).toBe(true);
+  // A reconnect now refreshes accounts as well as the badge. Its fresh request
+  // sees the new server total; the already captured response still contains 5.
+  accounts[1].unread = 4;
   await page.evaluate(() => (window as any).__emitMailboxEvent('ready',{unreadCount:6}));
   await expect.poll(async () => (await badge()).current).toBe(6);
   await expect(page.locator('.notification-settings .notification-count')).toHaveText('6');
   await expectVisibleBadge('6');
   releaseAccounts();
-  // The sidebar confirms that the stale response was committed, while the newer SSE total still wins.
-  await expect(page.locator('.unified-folder-group .mailbox-folder').first().locator('b')).toHaveText('5');
+  // Releasing the old response cannot roll back the refreshed total or the SSE badge.
+  await expect(page.locator('.unified-folder-group .mailbox-folder').first().locator('b')).toHaveText('6');
   expect((await badge()).current).toBe(6);
   await expect(page.locator('.notification-settings .notification-count')).toHaveText('6');
   await expect.poll(() => page.title()).toMatch(/^\(6\) /);
@@ -1650,8 +1656,8 @@ test('push worker uses an exact unread number for the application badge and pres
   expect(result.calls).toEqual([{type:'set',count:3},{type:'clear'},{type:'set',count:5}]);
   expect(result.notifications).toHaveLength(6);
   for (const notification of result.notifications) {
-    expect(notification.options.icon).toBe('/icon-192.png');
-    expect(notification.options.badge).toBe('/icon-192.png');
+    expect(notification.options.icon).toBe('/icon-blue-192-v2.png');
+    expect(notification.options.badge).toBe('/notification-badge-v2.png');
   }
   expect(result.notifications.slice(0,-1).map((notification: any) => notification.options.tag)).toEqual(Array(5).fill('mailnest-new-mail'));
   expect(result.notifications.slice(0,-1).every((notification: any) => notification.options.renotify)).toBe(true);

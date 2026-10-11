@@ -1401,7 +1401,7 @@
                 "schema": {
                   "type": "string"
                 },
-                "example": "event: ready\ndata: {\"unreadCount\":3}\n\nevent: mail\ndata: {\"accountId\":\"account-id\",\"count\":1,\"notificationId\":\"2d8f6e32-7e34-4b7b-a664-c740873398ad\",\"unreadCount\":4}\n\n"
+                "example": "event: ready\ndata: {\"unreadCount\":3}\n\nevent: mail\ndata: {\"accountId\":\"account-id\",\"count\":1,\"notificationId\":\"2d8f6e32-7e34-4b7b-a664-c740873398ad\",\"unreadCount\":4,\"notification\":{\"subject\":\"项目更新\",\"preview\":\"明天下午讨论设计。\",\"from\":{\"name\":\"项目团队\",\"address\":\"team@example.test\"}}}\n\nevent: change\ndata: {\"accountId\":\"account-id\",\"action\":\"message-moved\",\"messageId\":\"message-id\",\"unreadCount\":3}\n\n"
               }
             }
           },
@@ -1426,7 +1426,7 @@
             "sessionCookie": []
           }
         ],
-        "description": "当前用户会话订阅；浏览器 EventSource 使用 Cookie。事件 ready:{unreadCount}、mail:{accountId,count,notificationId,unreadCount}、sync:{accountId,status,unreadCount}，status 为 syncing / connected / partial / error；partial 表示部分目录失败，可刷新账号查询 error 中的原因。INBOX 自身成功同步建立基线后，后续新到邮件均提醒，包括已被其他客户端标为已读的邮件；首次导入及 UIDVALIDITY 重置时不将历史邮件作为新邮件提醒。notificationId 为本批次 UUID，与正常 Web Push 相同，用于前后台去重。每用户最多 10 条并发连接，每 25 秒保活；会话过期 / 注销 / 修改密码时关闭连接。连接中断后客户端可重新连接；事件不保证持久重放。 unreadCount 为本人全部账号最近取得的 INBOX 未读数之和；不按缓存邮件或多个标签双计，0 可清除角标。事件数据结构见 ReadyEvent / MailEvent / SyncEvent。"
+        "description": "本人会话 SSE：ready 未读总数，mail 新邮件（MailEvent，含可选主题正文摘要），sync 后台同步，change 成功状态变更（ChangeEvent）。多端在线会话均接收本人事件；断线重连需刷新，无持久重放。change 不产生系统新邮件通知。"
       }
     },
     "/push/subscriptions": {
@@ -2908,6 +2908,9 @@
             "type": "string",
             "format": "uuid",
             "description": "本批新到邮件的通知 UUID；正常 Web Push 与对应 SSE 共用，用于避免重复展示。"
+          },
+          "notification": {
+            "$ref": "#/components/schemas/MailNotificationDetails"
           }
         },
         "required": [
@@ -3108,13 +3111,15 @@
       },
       "PushNotification": {
         "type": "object",
-        "description": "正常邮件与测试均含 UUID，使用同一 Worker 展示 / 去重路径、high urgency、aes128gcm 和 ID 派生 topic。新邮件与 INBOX 缓存同事务持久入队，1 小时固定有效期内临时失败最多尝试 8 次，容器重启恢复；每次 TTL 为剩余秒数（最大 3600），接受后不再重发。测试仍即时单次投递、不自动入队重试。接受不保证设备送达。",
+        "description": "正常邮件与测试均含 UUID，使用同一 Worker 展示 / 去重路径、high urgency、aes128gcm 和 ID 派生 topic。新邮件与 INBOX 缓存同事务持久入队，1 小时固定有效期内临时失败最多尝试 8 次，容器重启恢复；每次 TTL 为剩余秒数（最大 3600），接受后不再重发。测试仍即时单次投递、不自动入队重试。接受不保证设备送达。 新邮件 title/body 显示主题和发件人/正文摘要，SSE notification 同源内容同 ID；持久投递 payload 暂存这些有限文字，最长1小时过期清理。日志和 Worker 去重库不存正文。",
         "properties": {
           "title": {
-            "type": "string"
+            "type": "string",
+            "description": "正常新邮件为本批最大新增 UID 邮件的主题（最多 120 个 Unicode 字符），空主题显示无主题；旧调用无详情时兼容计数文案。测试使用测试标题。"
           },
           "body": {
-            "type": "string"
+            "type": "string",
+            "description": "正常通知为发件人（名称最多80字符，否则地址）及纯文本正文摘要（最多200字符）；无文字时显示无正文摘要，同批多封追加另有 N 封新邮件。测试使用测试文案。"
           },
           "url": {
             "type": "string",
@@ -3161,6 +3166,78 @@
         },
         "required": [
           "accountIds"
+        ]
+      },
+      "MailNotificationDetails": {
+        "type": "object",
+        "description": "本批新增 INBOX 邮件中最大 UID 的有限主题、正文摘要和发件人；每批仅预取该邮件最多 16 KiB 文字部件，不取附件。8 秒提取失败降级空 preview。按 Unicode 码点限长并归一空白，不缓存完整正文。",
+        "properties": {
+          "subject": {
+            "type": "string",
+            "maxLength": 120
+          },
+          "preview": {
+            "type": "string",
+            "maxLength": 200,
+            "description": "MIME 解码、HTML 转纯文本后的正文摘要；提取失败或无文字正文时为空。"
+          },
+          "from": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "maxLength": 80
+              },
+              "address": {
+                "type": "string",
+                "maxLength": 254
+              }
+            },
+            "required": [
+              "name",
+              "address"
+            ]
+          }
+        },
+        "required": [
+          "subject",
+          "preview",
+          "from"
+        ]
+      },
+      "ChangeEvent": {
+        "type": "object",
+        "description": "成功状态变更广播本人全部在线会话，更新已加载列表/账号及当前阅读元数据；不是新邮件，不触发系统通知。无离线重放。",
+        "properties": {
+          "accountId": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "message-updated",
+              "message-moved",
+              "accounts-updated",
+              "message-sent"
+            ]
+          },
+          "messageId": {
+            "type": "string",
+            "description": "message-updated / message-moved 受影响的缓存邮件 ID。"
+          },
+          "message": {
+            "$ref": "#/components/schemas/MessageSummary"
+          },
+          "unreadCount": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "本人所有邮箱最新远端 INBOX 未读总数；成功操作先按当前状态增减，再 STATUS 校准。"
+          }
+        },
+        "required": [
+          "accountId",
+          "action",
+          "unreadCount"
         ]
       }
     },

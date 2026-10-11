@@ -1,8 +1,9 @@
-import { ImapFlow, type MessageStructureObject } from 'imapflow';
+import { ImapFlow, type MessageStructureObject, type FetchMessageObject } from 'imapflow';
 import nodemailer from 'nodemailer';
 import MailComposer from 'nodemailer/lib/mail-composer/index.js';
 import { simpleParser } from 'mailparser';
 import { createHash, randomUUID } from 'node:crypto';
+import type { Readable } from 'node:stream';
 import type { Config } from './config.js';
 import { Store, type AccountRow, type MessageRow, type FolderDto, type FolderKind, summaryDto } from './db.js';
 import { ApiError, SecretBox, resolveMailHost, safeMailError } from './security.js';
@@ -10,6 +11,8 @@ import { ApiError, SecretBox, resolveMailHost, safeMailError } from './security.
 export const MAX_MESSAGE_BYTES = 30 * 1024 * 1024;
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 const MAX_TEXT_BYTES = 512 * 1024;
+const MAX_NOTIFICATION_BODY_BYTES = 16 * 1024;
+const NOTIFICATION_PREVIEW_TIMEOUT = 8_000;
 export const INLINE_IMAGE_TYPES = new Set(['image/png','image/jpeg','image/gif','image/webp','image/avif','image/bmp']);
 interface CachedAttachment {id:string;filename:string;contentType:string;size:number;contentId:string|null;inline:boolean;part?:string;sourceIndex?:number;transferEncoding?:string}
 interface CachedDetail {cacheVersion:2;text:string;html:string|null;messageId:string|null;attachments:CachedAttachment[];bodyTruncated:boolean}
@@ -17,6 +20,17 @@ export interface Credentials {password?:string;smtpPassword?:string;smtpSeparate
 export interface AccountInput {name:string;email:string;color:string;provider:'gmail'|'imap';username:string;smtpUsername?:string;password:string;smtpPassword?:string;imap:{host:string;port:number;secure:boolean};smtp:{host:string;port:number;secure:boolean}}
 export interface AccountUpdateInput {name?:string;email?:string;color?:string;username?:string;password?:string;smtpUsername?:string|null;smtpPassword?:string|null;imap?:{host:string;port:number;secure:boolean};smtp?:{host:string;port:number;secure:boolean}}
 export interface SendInput {accountId:string;senderName?:string;to:string;cc?:string;bcc?:string;subject:string;text:string;inReplyTo?:string;references?:string;attachments?:{filename:string;contentType:string;content:string}[]}
+export interface MailNotificationDetails {subject:string;preview:string;from:{name:string;address:string}}
+function notificationText(value:string,limit:number) {
+  return Array.from(value.replace(/[\u0000-\u001f\u007f-\u009f]/g,' ').replace(/\s+/gu,' ').trim()).slice(0,limit).join('');
+}
+async function notificationHtmlPreview(value:string) {
+  // MailParser's skipImageLinks affects CID rewriting, not HTML-to-text images.
+  // Remove image tags so tracking URLs cannot displace the actual message text.
+  const html=Buffer.from(value).subarray(0,MAX_NOTIFICATION_BODY_BYTES).toString('utf8').replace(/<img\b(?:"[^"]*"|'[^']*'|[^'">])*>/gi,' ');
+  const parsed=await simpleParser(Buffer.from(`Content-Type: text/html; charset=utf-8\r\n\r\n${html}`),{skipTextToHtml:true,skipImageLinks:true,maxHtmlLengthToParse:MAX_NOTIFICATION_BODY_BYTES});
+  return notificationText(parsed.text||'',200);
+}
 type Emit = (userId:string,event:string,data:unknown)=>void;
 interface FolderRow {path:string;name:string;special_use:string|null;selectable?:number}
 const logicalUse: Record<string,string> = {sent:'\\Sent',drafts:'\\Drafts',junk:'\\Junk',trash:'\\Trash',archive:'\\Archive',important:'\\Important'};
@@ -90,11 +104,12 @@ export class MailService {
   private queues = new Map<string,Promise<unknown>>();
   private scheduled = new Map<string,Promise<void>>();
   private activeClients = new Set<ImapFlow>();
+  private timedOutClients = new WeakSet<ImapFlow>();
   private smtpClients = new Set<ReturnType<typeof nodemailer.createTransport>>();
   private stopped = false;
   private syncRunning=0;
   private syncWaiters:(()=>void)[]=[];
-  constructor(private store:Store,private config:Config,private emit:Emit,private notify:(userId:string,accountId:string,count:number,notificationId?:string)=>Promise<void>,private stageNotification?:(userId:string,accountId:string,count:number,notificationId:string)=>void) { this.box=new SecretBox(config.encryptionKey); }
+  constructor(private store:Store,private config:Config,private emit:Emit,private notify:(userId:string,accountId:string,count:number,notificationId?:string,details?:MailNotificationDetails)=>Promise<void>,private stageNotification?:(userId:string,accountId:string,count:number,notificationId:string,details?:MailNotificationDetails)=>void) { this.box=new SecretBox(config.encryptionKey); }
   private currentAccount(account:AccountRow):AccountRow {
     const current=this.store.account(account.id,account.user_id);
     if(!current)throw new ApiError(404,'NOT_FOUND','邮箱不存在。');
@@ -128,7 +143,7 @@ export class MailService {
     client.on('error',()=>{});
     this.activeClients.add(client);
     let timeout:ReturnType<typeof setTimeout>;
-    const expired=new Promise<never>((_,reject)=>{timeout=setTimeout(()=>{client.close();reject(new ApiError(504,'MAIL_TIMEOUT','邮箱操作超时，请稍后重试。'));},90_000);timeout.unref();});
+    const expired=new Promise<never>((_,reject)=>{timeout=setTimeout(()=>{this.timedOutClients.add(client);client.close();reject(new ApiError(504,'MAIL_TIMEOUT','邮箱操作超时，请稍后重试。'));},90_000);timeout.unref();});
     try{return await Promise.race([(async()=>{await client.connect();return work(client);})(),expired]);}
     finally{clearTimeout(timeout!);client.close();this.activeClients.delete(client);}
   }
@@ -245,11 +260,61 @@ export class MailService {
   }
   private async acquireSync() {if(this.syncRunning>=2)await new Promise<void>(resolve=>this.syncWaiters.push(resolve));this.syncRunning++;}
   async waitForSync() {await Promise.all(this.scheduled.values());}
+  private async notificationDetails(client:ImapFlow,message:FetchMessageObject):Promise<MailNotificationDetails> {
+    const from=addresses(message.envelope?.from)[0]||{name:'',address:''};
+    const details:MailNotificationDetails={subject:notificationText(message.envelope?.subject||'(无主题)',120)||'(无主题)',preview:'',from:{name:notificationText(from.name,80),address:notificationText(from.address,254)}};
+    let content:Readable|undefined,timedOut=false,timer:ReturnType<typeof setTimeout>|undefined;
+    const parseOptions={skipTextToHtml:true,skipHtmlToText:true,skipImageLinks:true,maxHtmlLengthToParse:MAX_NOTIFICATION_BODY_BYTES};
+    const extract=(async()=>{
+      if(message.bodyStructure) {
+        const bodies=messageParts(message.bodyStructure).bodies;
+        const part=bodies.find(part=>part.type.toLowerCase()==='text/plain')||bodies.find(part=>part.type.toLowerCase()==='text/html');
+        if(!part)return '';
+        const download=await client.download(message.uid,part.part||'1',{uid:true,maxBytes:MAX_NOTIFICATION_BODY_BYTES,chunkSize:8*1024});
+        if(timedOut){download.content?.destroy();return '';}
+        if(!download.content)return '';
+        content=download.content;
+        const chunks:Buffer[]=[];let bytes=0;
+        try {
+          for await(const chunk of content) {
+            const buffer=Buffer.from(chunk),remaining=MAX_NOTIFICATION_BODY_BYTES-bytes;
+            chunks.push(buffer.subarray(0,remaining));bytes+=Math.min(buffer.length,remaining);
+            if(bytes>=MAX_NOTIFICATION_BODY_BYTES)break;
+          }
+        }finally{content.destroy();}
+        const body=Buffer.concat(chunks,bytes).toString('utf8');
+        if(part.type.toLowerCase()==='text/plain')return notificationText(body,200);
+        return notificationHtmlPreview(body);
+      }
+      // A missing BODYSTRUCTURE is not permission to download attachments. Only
+      // fetch a bounded TEXT prefix after confirming a standalone textual body.
+      const header=await client.fetchOne(message.uid,{headers:['Content-Type','Content-Transfer-Encoding','Content-Disposition']},{uid:true});
+      if(timedOut||!header||!header.headers)return '';
+      const headers=header.headers.subarray(0,4096);
+      const parsedHeaders=await simpleParser(headers,parseOptions);
+      const type=parsedHeaders.headers.get('content-type') as {value?:string}|undefined;
+      const disposition=parsedHeaders.headers.get('content-disposition') as {value?:string}|undefined;
+      if(disposition?.value?.toLowerCase()==='attachment'||!['text/plain','text/html'].includes(type?.value?.toLowerCase()||'text/plain'))return '';
+      if(timedOut)return '';
+      const body=await client.fetchOne(message.uid,{bodyParts:[{key:'TEXT',start:0,maxLength:MAX_NOTIFICATION_BODY_BYTES}]},{uid:true});
+      if(timedOut||!body)return '';
+      const prefix=body.bodyParts?.get('text')||body.bodyParts?.get('TEXT');
+      if(!prefix)return '';
+      const parsed=await simpleParser(Buffer.concat([headers,Buffer.from('\r\n\r\n'),prefix.subarray(0,MAX_NOTIFICATION_BODY_BYTES)]),parseOptions);
+      return typeof parsed.html==='string'?notificationHtmlPreview(parsed.html):notificationText(parsed.text||'',200);
+    })();
+    try {
+      details.preview=await Promise.race([extract,new Promise<string>(resolve=>{timer=setTimeout(()=>{timedOut=true;content?.destroy();try{client.close();}catch{}resolve('');},NOTIFICATION_PREVIEW_TIMEOUT);timer.unref();})]);
+    }catch { /* Metadata still supplies a useful notification when its body cannot be read. */ }
+    finally {if(timer)clearTimeout(timer);content?.destroy();}
+    return details;
+  }
   private async sync(id:string) {
     return this.serial(id,async()=>{
       const account=this.store.account(id);if(!account)return;
       this.store.db.prepare("UPDATE accounts SET status='syncing',error=NULL WHERE id=?").run(id);this.emit(account.user_id,'sync',{accountId:id,status:'syncing'});
       let newMail=0,completed=0;
+      let notificationDetails:MailNotificationDetails|undefined;
       const notificationId=randomUUID();
       const failures:string[]=[];
       try {
@@ -283,6 +348,10 @@ export class MailService {
               const previousMaxUid=previous?.max_uid||0;
               const fetched=mailbox.exists?await client.fetchAll(`${Math.max(1,mailbox.exists-this.config.syncMessageLimit+1)}:*`,{uid:true,envelope:true,flags:true,internalDate:true,bodyStructure:true,size:true}):[];
               if(fetched.length<Math.min(mailbox.exists,this.config.syncMessageLimit))throw new ApiError(409,'INCOMPLETE_FETCH','目录返回的邮件列表不完整，已保留原有缓存，下次同步将重试。');
+              const latest=notifyNewMail?fetched.reduce<FetchMessageObject|undefined>((latest,message)=>message.uid>previousMaxUid&&(!latest||message.uid>latest.uid)?message:latest,undefined):undefined;
+              const folderNotification=latest?await this.notificationDetails(client,latest):undefined;
+              if(this.stopped)throw new ApiError(503,'SHUTDOWN','服务正在关闭。');
+              if(this.timedOutClients.has(client))throw new ApiError(504,'MAIL_TIMEOUT','邮箱操作超时，请稍后重试。');
               const seen=new Set<string>();
               let folderNewMail=0;
               this.store.db.exec('BEGIN IMMEDIATE');
@@ -293,7 +362,7 @@ export class MailService {
                 const envelope=message.envelope;
                 const dateValue=new Date(envelope?.date||message.internalDate||Date.now());
                 const date=Number.isNaN(dateValue.getTime())?new Date().toISOString():dateValue.toISOString();
-                const summary={from:addresses(envelope?.from)[0]||{name:'',address:''},to:addresses(envelope?.to),cc:addresses(envelope?.cc),subject:envelope?.subject||'(无主题)',preview:old?JSON.parse(old.summary).preview||'':'',date,hasAttachments:hasAttachments(message.bodyStructure),size:message.size};
+                const summary={from:addresses(envelope?.from)[0]||{name:'',address:''},to:addresses(envelope?.to),cc:addresses(envelope?.cc),subject:envelope?.subject||'(无主题)',preview:message.uid===latest?.uid?folderNotification?.preview||'':old?JSON.parse(old.summary).preview||'':'',date,hasAttachments:hasAttachments(message.bodyStructure),size:message.size};
                 const unread=!message.flags?.has('\\Seen'),starred=!!message.flags?.has('\\Flagged');
                 this.store.db.prepare('INSERT INTO messages(id,account_id,folder,uid,uid_validity,summary,unread,starred,date) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET summary=excluded.summary,unread=excluded.unread,starred=excluded.starred,date=excluded.date WHERE messages.summary<>excluded.summary OR messages.unread<>excluded.unread OR messages.starred<>excluded.starred OR messages.date<>excluded.date').run(messageId,id,path,message.uid,validity,JSON.stringify(summary),Number(unread),Number(starred),date);
                 // A phone or another mail client may mark the new message read
@@ -307,10 +376,11 @@ export class MailService {
               this.store.db.prepare('UPDATE folders SET uid_validity=? WHERE account_id=? AND path=? AND uid_validity IS NOT ?').run(validity,id,path,validity);
               // Persist the arrival intent with its INBOX cache update. A shutdown
               // while syncing later folders must not consume the new UID silently.
-              if(folderNewMail>0)this.stageNotification?.(account.user_id,id,folderNewMail,notificationId);
+              if(folderNewMail>0)this.stageNotification?.(account.user_id,id,folderNewMail,notificationId,folderNotification);
               this.store.db.exec('COMMIT');
               }catch(error){this.store.db.exec('ROLLBACK');throw error;}
               newMail+=folderNewMail;
+              if(folderNewMail>0)notificationDetails=folderNotification;
               completed++;
               if(path.toUpperCase()==='INBOX') {
                 const status=await client.status(path,{unseen:true});this.store.db.prepare('UPDATE accounts SET unread=? WHERE id=?').run((status && status.unseen)||0,id);
@@ -324,12 +394,12 @@ export class MailService {
         const status=failures.length?(completed?'partial':'error'):'connected';
         const error=failures.length?`部分目录同步未完成（${failures.length} 个）：${failures.slice(0,3).join('；')}`:null;
         this.store.db.prepare('UPDATE accounts SET status=?,error=?,last_synced_at=? WHERE id=?').run(status,error,completed?new Date().toISOString():account.last_synced_at,id);this.emit(account.user_id,'sync',{accountId:id,status});
-        if(newMail>0){this.emit(account.user_id,'mail',{accountId:id,count:newMail,notificationId});await this.notify(account.user_id,id,newMail,notificationId);}
+        if(newMail>0){this.emit(account.user_id,'mail',{accountId:id,count:newMail,notificationId,...(notificationDetails?{notification:notificationDetails}:{})});await this.notify(account.user_id,id,newMail,notificationId,notificationDetails);}
       }catch(error){
         if(this.stopped)return;
         const status=completed?'partial':'error';
         this.store.db.prepare('UPDATE accounts SET status=?,error=?,last_synced_at=? WHERE id=?').run(status,safeMailError(error),completed?new Date().toISOString():account.last_synced_at,id);this.emit(account.user_id,'sync',{accountId:id,status});
-        if(newMail>0){this.emit(account.user_id,'mail',{accountId:id,count:newMail,notificationId});await this.notify(account.user_id,id,newMail,notificationId);}
+        if(newMail>0){this.emit(account.user_id,'mail',{accountId:id,count:newMail,notificationId,...(notificationDetails?{notification:notificationDetails}:{})});await this.notify(account.user_id,id,newMail,notificationId,notificationDetails);}
       }
     });
   }
@@ -420,16 +490,32 @@ export class MailService {
       return{...attachment,content};
     }));
   }
+  private async refreshInboxUnread(account:AccountRow,client:ImapFlow,path:string,delta:number) {
+    // Update from the cache state inside the account queue, so concurrent devices
+    // repeating the same flag change cannot apply its unread delta twice.
+    this.store.db.prepare('UPDATE accounts SET unread=MAX(0,unread+?) WHERE id=?').run(delta,account.id);
+    try {
+      const status=await client.status(path,{unseen:true});
+      const unseen=status&&status.unseen;
+      if(typeof unseen!=='number'||!Number.isSafeInteger(unseen)||unseen<0)throw new Error('Missing inbox unread count');
+      this.store.db.prepare('UPDATE accounts SET unread=? WHERE id=?').run(unseen,account.id);
+    }catch {
+      // The remote mutation already succeeded. Keep the local delta and reconcile
+      // in the background instead of reporting a failure that invites a retry.
+      this.schedule(account.id);
+    }
+  }
   async flags(account:AccountRow,row:MessageRow,flags:{unread?:boolean;starred?:boolean}) {
     return this.serial(account.id,async()=>this.locked(account,row,async client=>{
       const existing=await client.fetchOne(row.uid,{flags:true},{uid:true});if(!existing)throw new ApiError(404,'NOT_FOUND','远端邮件已删除。');
       if(flags.unread!==undefined)await (flags.unread?client.messageFlagsRemove(row.uid,['\\Seen'],{uid:true}):client.messageFlagsAdd(row.uid,['\\Seen'],{uid:true}));
       if(flags.starred!==undefined)await (flags.starred?client.messageFlagsAdd(row.uid,['\\Flagged'],{uid:true}):client.messageFlagsRemove(row.uid,['\\Flagged'],{uid:true}));
       const unread=flags.unread??!existing.flags?.has('\\Seen'),starred=flags.starred??!!existing.flags?.has('\\Flagged');
+      const cached=this.store.message(row.id,account.user_id)||row;
       this.store.db.prepare('UPDATE messages SET unread=?,starred=? WHERE id=?').run(Number(unread),Number(starred),row.id);
-      if(row.folder.toUpperCase()==='INBOX') {const status=await client.status(row.folder,{unseen:true});this.store.db.prepare('UPDATE accounts SET unread=? WHERE id=?').run((status && status.unseen)||0,account.id);}
+      if(row.folder.toUpperCase()==='INBOX')await this.refreshInboxUnread(account,client,row.folder,Number(unread)-cached.unread);
       this.emit(account.user_id,'sync',{accountId:account.id,status:'connected'});
-      return summaryDto({...row,unread:Number(unread),starred:Number(starred)});
+      return summaryDto({...cached,unread:Number(unread),starred:Number(starred)});
     }));
   }
   async move(account:AccountRow,row:MessageRow,destination:string) {
@@ -438,8 +524,12 @@ export class MailService {
       const path=findFolder(this.folderRows(account.id),destination);if(!path)throw new ApiError(400,'FOLDER_MISSING','远端邮箱未提供此目录，请在原邮箱中创建归档或废纸篓目录。');
       if(path===row.folder)return;
       const result=await client.messageMove(row.uid,path,{uid:true});if(!result)throw new ApiError(400,'MOVE_FAILED','邮件移动失败，请重新同步。');
+      const cached=this.store.message(row.id,account.user_id)||row;
       this.store.db.prepare('DELETE FROM messages WHERE id=?').run(row.id);
+      const fromInbox=row.folder.toUpperCase()==='INBOX',toInbox=path.toUpperCase()==='INBOX';
+      if(fromInbox||toInbox)await this.refreshInboxUnread(account,client,findFolder(this.folderRows(account.id),'INBOX')||'INBOX',(Number(toInbox)-Number(fromInbox))*cached.unread);
     }));
+    this.emit(account.user_id,'sync',{accountId:account.id,status:'connected'});
     this.schedule(account.id);
   }
   async send(account:AccountRow,input:SendInput) {

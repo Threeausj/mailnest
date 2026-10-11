@@ -90,3 +90,8 @@ NAS 持续按 60 秒周期同步，关闭 PWA 不会停止。正常新邮件提�
 “设置 → 应用与提醒 → 锁屏提醒设置”提供设备指引。Android 允许邮屿及所用浏览器锁屏通知、后台运行和后台联网，延迟时检查电池限制；不要强行停止浏览器。iPhone / iPad 16.4+ 添加主屏幕后打开并开启提醒，在系统通知中允许锁屏显示，检查专注模式。[Android 官方说明](https://web.dev/articles/push-notifications-faq)、[Apple 官方说明](https://webkit.org/blog/13878/web-push-for-web-apps-on-ios-and-ipados/)
 
 “设置 → 邮箱管理”上下移动账号并保存，顺序保存在服务器，导航和发件邮箱选择同步，新账号追加末尾。写信 / 回复 / 转发的“发件人名称”默认所选邮箱名称，可自行修改本次显示名，发件地址仍是所选邮箱。
+
+
+通知外观：新邮件标题显示主题，下面显示发件人和正文摘要；同批多封显示最新一封并提示其余数量。应用和通知图标统一为蓝色信封，Android 小图标使用透明单色轮廓。关闭并重新打开 PWA 可加载新版，已安装的桌面图标可能由系统延迟更新。网页无法强制删除系统控制的 Chrome 来源标识；通过“安装应用”完整安装的 Android WebAPK 可使用独立通知身份，普通桌面快捷方式不同。参考 [Google 通知图标说明](https://web.dev/articles/push-notifications-display-a-notification) 与 [Chromium Android 架构](https://github.com/chromium/chromium/blob/main/components/webapps/docs/android_architecture.md)。
+
+邮件列表取消翻页按钮：向下滑动接近底部自动加载下一批 30 封，底部显示已加载数量与总数；失败可原地重试，切换邮箱、目录、筛选或搜索重新从头加载。后台刷新保留已加载范围和滚动位置。

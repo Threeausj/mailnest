@@ -11,7 +11,7 @@ import webPush from 'web-push';
 import { type Config, loadConfig, repoRoot, frontendBuilt } from './config.js';
 import { Store, type UserRow, type AccountRow, type MessageRow, accountDto, summaryDto, userDto } from './db.js';
 import { ApiError, hashPassword, verifyPassword, hashToken, randomToken, safeMailError } from './security.js';
-import { MailService, findFolder, googleToken, googleIdentity } from './mail.js';
+import { MailService, findFolder, googleToken, googleIdentity, type MailNotificationDetails } from './mail.js';
 import { PushDeliveryQueue, pushDeliveryOptions } from './push.js';
 
 interface Auth {user:UserRow;kind:'session'|'token';sessionId?:string;expiresAt?:number}
@@ -30,6 +30,19 @@ function validatePushEndpoint(endpoint:string) {
   if(url.protocol!=='https:'||url.username||url.password||url.port||!trustedPushHosts.some(host=>url.hostname===host||url.hostname.endsWith(`.${host}`)))throw new ApiError(400,'INVALID_PUSH_ENDPOINT','仅支持浏览器提供的 HTTPS 推送服务地址。');
 }
 function pushStatus(error:unknown) {return error&&typeof error==='object'?(error as {statusCode?:number}).statusCode:undefined;}
+function notificationLine(value:string,max:number) {
+  const characters=Array.from(value.replace(/[\u0000-\u001f\u007f]/g,' ').replace(/\s+/gu,' ').trim());
+  return characters.length>max?characters.slice(0,max-1).join('')+'…':characters.join('');
+}
+function notificationContent(count:number,details?:MailNotificationDetails) {
+  if(!details)return{title:'MailNest 新邮件',body:`有 ${count} 封新邮件等待查看`};
+  const title=notificationLine(details.subject,120)||'无主题';
+  const sender=notificationLine(details.from.name,80)||notificationLine(details.from.address,80)||'未知发件人';
+  const preview=notificationLine(details.preview,200)||'（无正文摘要）';
+  // Code-point bounds retain Chinese/emoji intact and keep the encrypted push
+  // below the 4 KB provider limit, including its fixed routing fields/overhead.
+  return{title,body:`${sender}：${preview}${count>1?` · 另有 ${count-1} 封新邮件`:''}`};
+}
 interface EventClient {response:ServerResponse;sessionId:string;userId:string;expiresAt:number}
 
 export async function buildApp(config:Config=loadConfig()) {
@@ -40,7 +53,7 @@ export async function buildApp(config:Config=loadConfig()) {
   const clients=new Set<EventClient>();
   const unreadCount=(userId:string)=>(store.db.prepare('SELECT COALESCE(SUM(unread),0) AS n FROM accounts WHERE user_id=?').get(userId) as {n:number}).n;
   const emit=(userId:string,event:string,data:unknown)=>{
-    const payload=event==='mail'||event==='sync'?{...(data as Record<string,unknown>),unreadCount:unreadCount(userId)}:data;
+    const payload=['mail','sync','change'].includes(event)?{...(data as Record<string,unknown>),unreadCount:unreadCount(userId)}:data;
     const frame=`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
     for(const client of clients)if(client.userId===userId){if(client.response.writableLength>128*1024){client.response.end();clients.delete(client);}else client.response.write(frame);}
   };
@@ -54,14 +67,14 @@ export async function buildApp(config:Config=loadConfig()) {
     if(owner)data.unreadCount=unreadCount(owner);
     return webPush.sendNotification(subscription,JSON.stringify(data),options);
   }});
-  function notification(userId:string,accountId:string,count:number,notificationId:string) {
-    return{userId,accountId,notificationId,payload:JSON.stringify({title:'MailNest 新邮件',body:`有 ${count} 封新邮件等待查看`,url:`/?account=${encodeURIComponent(accountId)}`,tag:`mail-${accountId}`,notificationId,unreadCount:unreadCount(userId)})};
+  function notification(userId:string,accountId:string,count:number,notificationId:string,details?:MailNotificationDetails) {
+    return{userId,accountId,notificationId,payload:JSON.stringify({...notificationContent(count,details),url:`/?account=${encodeURIComponent(accountId)}`,tag:`mail-${accountId}`,notificationId,unreadCount:unreadCount(userId)})};
   }
-  function stageNotification(userId:string,accountId:string,count:number,notificationId:string) {
-    if(config.vapidPublicKey&&config.vapidPrivateKey)pushQueue.stage(notification(userId,accountId,count,notificationId));
+  function stageNotification(userId:string,accountId:string,count:number,notificationId:string,details?:MailNotificationDetails) {
+    if(config.vapidPublicKey&&config.vapidPrivateKey)pushQueue.stage(notification(userId,accountId,count,notificationId,details));
   }
-  async function notify(userId:string,accountId:string,count:number,notificationId:string=randomUUID()) {
-    if(config.vapidPublicKey&&config.vapidPrivateKey)await pushQueue.enqueue(notification(userId,accountId,count,notificationId));
+  async function notify(userId:string,accountId:string,count:number,notificationId:string=randomUUID(),details?:MailNotificationDetails) {
+    if(config.vapidPublicKey&&config.vapidPrivateKey)await pushQueue.enqueue(notification(userId,accountId,count,notificationId,details));
   }
   const mail=new MailService(store,config,emit,notify,stageNotification);
   const loginAttempts=new Map<string,{count:number;until:number}>();
@@ -141,19 +154,21 @@ export async function buildApp(config:Config=loadConfig()) {
     store.db.exec('BEGIN IMMEDIATE');
     try{const update=store.db.prepare('UPDATE accounts SET sort_order=? WHERE id=? AND user_id=?');input.accountIds.forEach((id,index)=>update.run(index,id,request.auth!.user.id));store.db.exec('COMMIT');}
     catch(error){store.db.exec('ROLLBACK');throw error;}
+    if(input.accountIds.length)emit(request.auth!.user.id,'change',{accountId:input.accountIds[0],action:'accounts-updated'});
     return{accounts:store.accounts(request.auth!.user.id).map(row=>accountDto(row,mail.cachedFolders(row.id),mail.authInfo(row)))};
   });
   app.post(`${prefix}/accounts`,async(request,reply)=>{
     const input=accountSchema.parse(request.body);
     if(input.provider==='gmail' && (input.imap.host.toLowerCase()!=='imap.gmail.com'||input.smtp.host.toLowerCase()!=='smtp.gmail.com'||input.username.toLowerCase()!==input.email.toLowerCase()||(input.smtpUsername&&input.smtpUsername.toLowerCase()!==input.email.toLowerCase())))throw new ApiError(400,'GMAIL_SETTINGS','Google 邮箱需使用 imap.gmail.com / smtp.gmail.com，且用户名与邮箱地址一致。');
-    const created=await mail.create(request.auth!.user.id,input);return reply.code(201).send({account:accountDto(created,mail.cachedFolders(created.id),mail.authInfo(created))});
+    const created=await mail.create(request.auth!.user.id,input);emit(request.auth!.user.id,'change',{accountId:created.id,action:'accounts-updated'});return reply.code(201).send({account:accountDto(created,mail.cachedFolders(created.id),mail.authInfo(created))});
   });
   app.patch(`${prefix}/accounts/:id`,async request=>{
     const current=account(request,(request.params as {id:string}).id);
     const result=await mail.update(current,accountUpdateSchema.parse(request.body));
+    emit(request.auth!.user.id,'change',{accountId:current.id,action:'accounts-updated'});
     return{account:accountDto(result.account,mail.cachedFolders(current.id),mail.authInfo(result.account)),cacheReset:result.cacheReset};
   });
-  app.delete(`${prefix}/accounts/:id`,async request=>{const {id}=request.params as {id:string};await mail.remove(account(request,id));return{ok:true};});
+  app.delete(`${prefix}/accounts/:id`,async request=>{const {id}=request.params as {id:string};await mail.remove(account(request,id));emit(request.auth!.user.id,'change',{accountId:id,action:'accounts-updated'});return{ok:true};});
   app.get(`${prefix}/accounts/:id/folders`,async request=>{const {id}=request.params as {id:string};try{return{folders:await mail.listFolders(account(request,id))};}catch(error){if(error instanceof ApiError)throw error;throw new ApiError(400,'MAIL_OPERATION_FAILED',safeMailError(error));}});
   app.post(`${prefix}/accounts/:id/sync`,async request=>{const {id}=request.params as {id:string};mail.schedule(account(request,id).id);return{ok:true};});
   app.post(`${prefix}/sync`,async request=>{
@@ -183,11 +198,11 @@ export async function buildApp(config:Config=loadConfig()) {
   app.get(`${prefix}/messages/:id`,async request=>{const row=message(request,(request.params as {id:string}).id);try{return{message:await mail.detail(account(request,row.account_id),row)};}catch(error){if(error instanceof ApiError)throw error;throw new ApiError(400,'MAIL_OPERATION_FAILED',safeMailError(error));}});
   app.patch(`${prefix}/messages/:id`,async request=>{
     const input=z.object({unread:z.boolean().optional(),starred:z.boolean().optional()}).strict().refine(v=>v.unread!==undefined||v.starred!==undefined).parse(request.body);const row=message(request,(request.params as {id:string}).id);
-    try{return{message:await mail.flags(account(request,row.account_id),row,input)};}catch(error){if(error instanceof ApiError)throw error;throw new ApiError(400,'MAIL_OPERATION_FAILED',safeMailError(error));}
+    try{const updated=await mail.flags(account(request,row.account_id),row,input);emit(request.auth!.user.id,'change',{accountId:row.account_id,action:'message-updated',messageId:row.id,message:updated});return{message:updated};}catch(error){if(error instanceof ApiError)throw error;throw new ApiError(400,'MAIL_OPERATION_FAILED',safeMailError(error));}
   });
   app.post(`${prefix}/messages/:id/move`,async request=>{
     const input=z.object({destination:z.enum(['trash','archive','INBOX'])}).strict().parse(request.body);const row=message(request,(request.params as {id:string}).id);
-    try{await mail.move(account(request,row.account_id),row,input.destination);return{ok:true};}catch(error){if(error instanceof ApiError)throw error;throw new ApiError(400,'MAIL_OPERATION_FAILED',safeMailError(error));}
+    try{await mail.move(account(request,row.account_id),row,input.destination);emit(request.auth!.user.id,'change',{accountId:row.account_id,action:'message-moved',messageId:row.id});return{ok:true};}catch(error){if(error instanceof ApiError)throw error;throw new ApiError(400,'MAIL_OPERATION_FAILED',safeMailError(error));}
   });
   app.get(`${prefix}/messages/:id/attachments/:attachmentId`,async(request,reply)=>{
     const params=request.params as {id:string;attachmentId:string};const row=message(request,params.id);
@@ -198,7 +213,7 @@ export async function buildApp(config:Config=loadConfig()) {
     const filename=Array.from(attachment.filename.replace(/[\r\n\x00]/g,'')).slice(0,255).join('');
     return reply.header('Content-Disposition',`${inline?'inline':'attachment'}; filename="attachment"; filename*=UTF-8''${encodeURIComponent(filename).replace(/['()*]/g,c=>`%${c.charCodeAt(0).toString(16)}`)}`).header('Content-Security-Policy',"default-src 'none'; sandbox").type(inline?attachment.contentType:'application/octet-stream').send(attachment.content);
   });
-  app.post(`${prefix}/messages/send`,async request=>{const input=sendSchema.parse(request.body);try{return await mail.send(account(request,input.accountId),input);}catch(error){if(error instanceof ApiError)throw error;throw new ApiError(400,'MAIL_SEND_FAILED',safeMailError(error));}});
+  app.post(`${prefix}/messages/send`,async request=>{const input=sendSchema.parse(request.body);try{const sent=await mail.send(account(request,input.accountId),input);emit(request.auth!.user.id,'change',{accountId:input.accountId,action:'message-sent'});return sent;}catch(error){if(error instanceof ApiError)throw error;throw new ApiError(400,'MAIL_SEND_FAILED',safeMailError(error));}});
   app.get(`${prefix}/oauth/google/start`,async request=>{
     sessionOnly(request);if(!config.googleClientId||!config.googleClientSecret)throw new ApiError(503,'GOOGLE_NOT_CONFIGURED','管理员尚未配置 Google OAuth。');
     const state=randomToken(),verifier=randomBytes(48).toString('base64url');
