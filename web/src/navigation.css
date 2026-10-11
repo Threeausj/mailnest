@@ -15,7 +15,7 @@
   padding-right: 5px;
   padding-bottom: 10px;
 }
-.mailbox-folder-group + .mailbox-folder-group { margin-top: 14px; }
+.mailbox-folder-group + .mailbox-folder-group { margin-top: 4px; }
 .mailbox-group-heading {
   display: flex;
   align-items: center;
@@ -80,6 +80,10 @@
 }
 .sidebar-bottom > .nav-item { min-height: 40px; }
 .sidebar .mailbox-add-heading { margin-top: 16px; margin-bottom: 0; }
+.account-order-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+.account-order-hint { margin-bottom: 12px; }
+.account-settings-card .account-card-detail { gap: 12px; flex-wrap: wrap; }
+.account-settings-card .account-card-detail > div { margin-left: auto; justify-content: flex-end; flex-wrap: wrap; }
 @media (pointer: coarse) {
   .mail-app .sidebar .mailbox-folder,
   .mailbox-group-heading, .mailbox-custom-heading { min-height: 40px; }

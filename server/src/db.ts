@@ -10,7 +10,7 @@ export interface AccountRow {
   id:string; user_id:string; name:string; email:string; color:string; provider:'gmail'|'imap'; username:string; smtp_username:string;
   imap_host:string; imap_port:number; imap_secure:number; smtp_host:string; smtp_port:number; smtp_secure:number; credentials:string;
   status:'connected'|'partial'|'error'|'syncing'; last_synced_at:string|null; error:string|null; unread:number;
-  mail_cache_epoch?:string;
+  mail_cache_epoch?:string;sort_order?:number;
 }
 export interface MessageRow {
   id:string; account_id:string; folder:string; uid:number; uid_validity:string; summary:string;
@@ -38,6 +38,9 @@ export class Store {
       CREATE TABLE IF NOT EXISTS attachments(id TEXT PRIMARY KEY,message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,filename TEXT NOT NULL,content_type TEXT NOT NULL,size INTEGER NOT NULL,content BLOB NOT NULL);
       CREATE TABLE IF NOT EXISTS oauth_states(state TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,session_id TEXT NOT NULL,verifier TEXT NOT NULL,expires_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS push_subscriptions(endpoint TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,subscription TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS push_deliveries(id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,notification_id TEXT NOT NULL,endpoint_hash TEXT NOT NULL,subscription_hash TEXT NOT NULL,payload TEXT NOT NULL,created_at INTEGER NOT NULL,expires_at INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'pending',attempts INTEGER NOT NULL DEFAULT 0,next_attempt_at INTEGER NOT NULL,last_status INTEGER,last_category TEXT,last_accepted_at INTEGER,UNIQUE(user_id,notification_id,endpoint_hash));
+      CREATE INDEX IF NOT EXISTS push_deliveries_due ON push_deliveries(status,next_attempt_at,expires_at);
+      CREATE INDEX IF NOT EXISTS push_deliveries_owner ON push_deliveries(user_id,expires_at);
     `);
     const columns=this.db.prepare('PRAGMA table_info(messages)').all() as {name:string}[];
     if(!columns.some(column=>column.name==='detail_cached_at'))this.db.exec('ALTER TABLE messages ADD COLUMN detail_cached_at INTEGER');
@@ -45,6 +48,7 @@ export class Store {
     if(!folderColumns.some(column=>column.name==='selectable'))this.db.exec('ALTER TABLE folders ADD COLUMN selectable INTEGER NOT NULL DEFAULT 1');
     const accountColumns=this.db.prepare('PRAGMA table_info(accounts)').all() as {name:string}[];
     if(!accountColumns.some(column=>column.name==='mail_cache_epoch'))this.db.exec("ALTER TABLE accounts ADD COLUMN mail_cache_epoch TEXT NOT NULL DEFAULT ''");
+    if(!accountColumns.some(column=>column.name==='sort_order'))this.db.exec('ALTER TABLE accounts ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0');
     // Old versions stored both complete MIME messages and decoded attachment bytes.
     // The remote mailbox remains the source of truth; keep only bounded body caches.
     this.db.exec("UPDATE messages SET source=NULL WHERE source IS NOT NULL; DELETE FROM attachments; UPDATE messages SET detail=NULL,detail_cached_at=NULL WHERE detail IS NOT NULL AND (json_extract(detail,'$.cacheVersion') IS NOT 2)");
@@ -69,7 +73,7 @@ export class Store {
   account(id:string,userId?:string) {
     return this.db.prepare(`SELECT * FROM accounts WHERE id=?${userId?' AND user_id=?':''}`).get(...(userId?[id,userId]:[id])) as AccountRow|undefined;
   }
-  accounts(userId?:string) { return this.db.prepare(`SELECT * FROM accounts${userId?' WHERE user_id=?':''} ORDER BY name`).all(...(userId?[userId]:[])) as unknown as AccountRow[]; }
+  accounts(userId?:string) { return this.db.prepare(`SELECT * FROM accounts${userId?' WHERE user_id=?':''} ORDER BY sort_order,name,id`).all(...(userId?[userId]:[])) as unknown as AccountRow[]; }
   message(id:string,userId:string) {
     return this.db.prepare('SELECT m.* FROM messages m JOIN accounts a ON a.id=m.account_id WHERE m.id=? AND a.user_id=?').get(id,userId) as MessageRow|undefined;
   }

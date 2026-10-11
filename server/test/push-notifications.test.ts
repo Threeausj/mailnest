@@ -60,7 +60,8 @@ function payload(call:SendParameters) {return JSON.parse(String(call[1])) as {un
 function assertDeliveryOptions(call:SendParameters) {
   const notificationId=payload(call).notificationId;
   assert.match(notificationId||'',/^[a-f\d]{8}-[a-f\d]{4}-4[a-f\d]{3}-[89ab][a-f\d]{3}-[a-f\d]{12}$/i);
-  assert.deepEqual(call[2],{TTL:3600,timeout:10_000,contentEncoding:'aes128gcm',urgency:'high',topic:createHash('sha256').update(notificationId!).digest('base64url').slice(0,32)});
+  assert.ok(Number.isInteger(call[2]?.TTL)&&call[2]!.TTL!>0&&call[2]!.TTL!<=3600);
+  assert.deepEqual(call[2],{TTL:call[2]!.TTL,timeout:10_000,contentEncoding:'aes128gcm',urgency:'high',topic:createHash('sha256').update(notificationId!).digest('base64url').slice(0,32)});
 }
 
 test('explicit test sends only to the selected owned device, keeps unread state and excludes duplicate labels and other owners',async()=>fixture(async(project,userId,cookie,delivery)=>{
@@ -147,13 +148,28 @@ test('provider topics are stable for one notification batch and distinct for lat
   const account=seedAccount(project,userId,2),selected=endpoint('batch-topics');seedSubscription(project,userId,selected);
   const hooks=project.mail as unknown as MailHooks,firstId=randomUUID(),nextId=randomUUID();
   await hooks.notify(userId,account,1,firstId);await hooks.notify(userId,account,1,firstId);await hooks.notify(userId,account,1,nextId);
-  assert.equal((await sendTest(project,cookie,selected)).statusCode,200);assert.equal(delivery.calls.length,4);
+  assert.equal((await sendTest(project,cookie,selected)).statusCode,200);assert.equal(delivery.calls.length,3);
   for(const call of delivery.calls)assertDeliveryOptions(call);
-  assert.equal(delivery.calls[0][2]!.topic,delivery.calls[1][2]!.topic);
-  assert.notEqual(delivery.calls[1][2]!.topic,delivery.calls[2][2]!.topic);assert.notEqual(delivery.calls[2][2]!.topic,delivery.calls[3][2]!.topic);
-  assert.equal(payload(delivery.calls[0]).tag,`mail-${account}`);assert.equal(payload(delivery.calls[2]).tag,`mail-${account}`);assert.equal(payload(delivery.calls[3]).tag,'mailnest-test');
-  assert.notEqual(payload(delivery.calls[3]).notificationId,firstId);assert.notEqual(payload(delivery.calls[3]).notificationId,nextId);
-  assert.equal(payload(delivery.calls[3]).unreadCount,2);
+  assert.notEqual(delivery.calls[0][2]!.topic,delivery.calls[1][2]!.topic);assert.notEqual(delivery.calls[1][2]!.topic,delivery.calls[2][2]!.topic);
+  assert.equal(payload(delivery.calls[0]).tag,`mail-${account}`);assert.equal(payload(delivery.calls[1]).tag,`mail-${account}`);assert.equal(payload(delivery.calls[2]).tag,'mailnest-test');
+  assert.notEqual(payload(delivery.calls[2]).notificationId,firstId);assert.notEqual(payload(delivery.calls[2]).notificationId,nextId);
+  assert.equal(payload(delivery.calls[2]).unreadCount,2);
+}));
+
+test('new-mail retries keep the original ID but refresh the inbox badge from current account state',async()=>fixture(async(project,userId,_cookie,delivery)=>{
+  const account=seedAccount(project,userId,7),selected=endpoint('retry-current-badge');seedSubscription(project,userId,selected);
+  const hooks=project.mail as unknown as MailHooks,notificationId=randomUUID();
+  delivery.error={statusCode:503,headers:{'retry-after':'15'}};
+  await hooks.notify(userId,account,1,notificationId);
+  assert.equal(delivery.calls.length,1);assert.equal(payload(delivery.calls[0]).unreadCount,7);
+  assert.equal(project.pushQueue.stats(userId).retrying,1);
+  project.store.db.prepare('UPDATE accounts SET unread=0 WHERE id=?').run(account);
+  project.store.db.prepare("UPDATE push_deliveries SET next_attempt_at=0 WHERE status='pending'").run();
+  delete delivery.error;await project.pushQueue.flush();
+  assert.equal(delivery.calls.length,2);assert.equal(payload(delivery.calls[1]).unreadCount,0);
+  assert.equal(payload(delivery.calls[1]).notificationId,notificationId);assert.equal(delivery.calls[1][2]!.topic,delivery.calls[0][2]!.topic);
+  assert.equal(project.pushQueue.stats(userId).accepted,1);assert.equal(project.pushQueue.stats(userId).pending,0);
+  await hooks.notify(userId,account,1,notificationId);assert.equal(delivery.calls.length,2);
 }));
 
 test('SSE ready and account updates include the current scoped unread total without remote mail access',async()=>fixture(async(project,userId,cookie)=>{

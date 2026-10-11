@@ -216,7 +216,7 @@ test('mailbox selection, safe HTML reader, attachments and compose failure/retry
   expect((await downloadPromise).suggestedFilename()).toBeTruthy();
   await page.locator('.reply-actions').getByRole('button',{name:'回复邮件',exact:true}).click();
   const composer = page.getByRole('dialog');
-  await expect(composer.getByLabel('发件人')).toHaveValue('alpha');
+  await expect(composer.getByLabel('发件人',{exact:true})).toHaveValue('alpha');
   await expect(composer.getByLabel(/^收件人/)).toHaveValue('team@example.com');
   await expect(composer.getByLabel('主题',{exact:true})).toHaveValue('Re: 项目进展与设计文件');
   await composer.getByLabel('邮件正文').fill('测试回复草稿');

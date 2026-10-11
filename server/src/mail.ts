@@ -16,7 +16,7 @@ interface CachedDetail {cacheVersion:2;text:string;html:string|null;messageId:st
 export interface Credentials {password?:string;smtpPassword?:string;smtpSeparate?:boolean;oauth?:{accessToken:string;refreshToken:string;expiresAt:number}}
 export interface AccountInput {name:string;email:string;color:string;provider:'gmail'|'imap';username:string;smtpUsername?:string;password:string;smtpPassword?:string;imap:{host:string;port:number;secure:boolean};smtp:{host:string;port:number;secure:boolean}}
 export interface AccountUpdateInput {name?:string;email?:string;color?:string;username?:string;password?:string;smtpUsername?:string|null;smtpPassword?:string|null;imap?:{host:string;port:number;secure:boolean};smtp?:{host:string;port:number;secure:boolean}}
-export interface SendInput {accountId:string;to:string;cc?:string;bcc?:string;subject:string;text:string;inReplyTo?:string;references?:string;attachments?:{filename:string;contentType:string;content:string}[]}
+export interface SendInput {accountId:string;senderName?:string;to:string;cc?:string;bcc?:string;subject:string;text:string;inReplyTo?:string;references?:string;attachments?:{filename:string;contentType:string;content:string}[]}
 type Emit = (userId:string,event:string,data:unknown)=>void;
 interface FolderRow {path:string;name:string;special_use:string|null;selectable?:number}
 const logicalUse: Record<string,string> = {sent:'\\Sent',drafts:'\\Drafts',junk:'\\Junk',trash:'\\Trash',archive:'\\Archive',important:'\\Important'};
@@ -94,7 +94,7 @@ export class MailService {
   private stopped = false;
   private syncRunning=0;
   private syncWaiters:(()=>void)[]=[];
-  constructor(private store:Store,private config:Config,private emit:Emit,private notify:(userId:string,accountId:string,count:number,notificationId?:string)=>Promise<void>) { this.box=new SecretBox(config.encryptionKey); }
+  constructor(private store:Store,private config:Config,private emit:Emit,private notify:(userId:string,accountId:string,count:number,notificationId?:string)=>Promise<void>,private stageNotification?:(userId:string,accountId:string,count:number,notificationId:string)=>void) { this.box=new SecretBox(config.encryptionKey); }
   private currentAccount(account:AccountRow):AccountRow {
     const current=this.store.account(account.id,account.user_id);
     if(!current)throw new ApiError(404,'NOT_FOUND','邮箱不存在。');
@@ -156,7 +156,7 @@ export class MailService {
       try{await this.boundedSmtp(smtp,()=>smtp.verify());}finally{this.closeSmtp(smtp);}
     }catch(error){throw error instanceof ApiError?error:new ApiError(400,'MAIL_CONNECTION_FAILED',safeMailError(error));}
     if (this.stopped) throw new ApiError(503,'SHUTDOWN','服务正在关闭。');
-    this.store.db.prepare('INSERT INTO accounts(id,user_id,name,email,color,provider,username,smtp_username,imap_host,imap_port,imap_secure,smtp_host,smtp_port,smtp_secure,credentials) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(account.id,userId,account.name,account.email,account.color,account.provider,account.username,account.smtp_username,account.imap_host,account.imap_port,account.imap_secure,account.smtp_host,account.smtp_port,account.smtp_secure,account.credentials);
+    this.store.db.prepare('INSERT INTO accounts(id,user_id,name,email,color,provider,username,smtp_username,imap_host,imap_port,imap_secure,smtp_host,smtp_port,smtp_secure,credentials,sort_order) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,COALESCE((SELECT MAX(sort_order)+1 FROM accounts WHERE user_id=?),0))').run(account.id,userId,account.name,account.email,account.color,account.provider,account.username,account.smtp_username,account.imap_host,account.imap_port,account.imap_secure,account.smtp_host,account.smtp_port,account.smtp_secure,account.credentials,userId);
     this.schedule(account.id);
     return account;
   }
@@ -305,6 +305,9 @@ export class MailService {
               const cached=this.store.db.prepare('SELECT id FROM messages WHERE account_id=? AND folder=?').all(id,path) as {id:string}[];
               for(const item of cached)if(!seen.has(item.id))this.store.db.prepare('DELETE FROM messages WHERE id=?').run(item.id);
               this.store.db.prepare('UPDATE folders SET uid_validity=? WHERE account_id=? AND path=? AND uid_validity IS NOT ?').run(validity,id,path,validity);
+              // Persist the arrival intent with its INBOX cache update. A shutdown
+              // while syncing later folders must not consume the new UID silently.
+              if(folderNewMail>0)this.stageNotification?.(account.user_id,id,folderNewMail,notificationId);
               this.store.db.exec('COMMIT');
               }catch(error){this.store.db.exec('ROLLBACK');throw error;}
               newMail+=folderNewMail;
@@ -445,7 +448,7 @@ export class MailService {
       const credentials=await this.credentials(account);
       const attachments=(input.attachments||[]).map(a=>({filename:a.filename,contentType:a.contentType,content:Buffer.from(a.content,'base64')}));
       if(attachments.reduce((sum,a)=>sum+a.content.length,0)>20*1024*1024)throw new ApiError(413,'ATTACHMENTS_TOO_LARGE','附件总大小不能超过 20 MiB。');
-      const mail={from:{name:account.name,address:account.email},to:input.to,cc:input.cc||undefined,bcc:input.bcc||undefined,subject:input.subject,text:input.text,inReplyTo:input.inReplyTo,references:input.references,attachments,disableFileAccess:true,disableUrlAccess:true};
+      const mail={from:{name:input.senderName?.trim()||account.name,address:account.email},to:input.to,cc:input.cc||undefined,bcc:input.bcc||undefined,subject:input.subject,text:input.text,inReplyTo:input.inReplyTo,references:input.references,attachments,disableFileAccess:true,disableUrlAccess:true};
       const transport=await this.smtp(account,credentials);
       let raw:Buffer;
       let messageId:string;

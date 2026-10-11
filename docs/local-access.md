@@ -78,6 +78,15 @@ Google Cloud Web 应用客户端的“已获授权的重定向 URI”须精确�
 
 正常新邮件提醒按默认 60 秒轮询触发，可在登录后的 `/api/v1/config` 查看 `pollingInterval`，并非即时协议。INBOX 自己首次成功同步或 UIDVALIDITY 重置时安静建立基线；后续新到邮件即使先被其他客户端读过也会提醒。前台 SSE 与后台 Push 共用批次 `notificationId` 去重；同账号稳定 tag 配合 `renotify` 提醒下一批。去重记录仅为 UUID 与时间，IndexedDB 保留 7 天、最多 128 条，不含邮件正文或凭据。历史读取及写入各限 500 毫秒，失败或永久等待时自动降级内存，后续通知继续展示；应用启动及回到前台会检查 Worker 更新，保留当前页面与草稿。
 
-用户已确认测试通知能收到，自动新邮件的真机送达仍待验收。可在上述容器日志中查找 `New-mail push accepted` / `New-mail push failed`；日志不含 endpoint、订阅密钥或正文。服务商接受并不保证设备已经收到。
+用户已确认测试通知能收到，自动新邮件的真机送达仍待验收。可在上述容器日志中查找 `New-mail push accepted` / `New-mail push retry scheduled` / `New-mail push stopped`；日志不含 endpoint、订阅密钥或正文。服务商接受并不保证设备已经收到。
 
 较窄阅读区的铃铛收进菜单时，“更多”按钮及提醒菜单继续显示数字红点。应用内数字红点与页面标题使用所有账号远端收件箱的总未读数，同步事件、前台轮询与后台推送会更新它。支持 Badging API 的系统可显示安装后应用图标的数字角标；全部已读或退出登录时清除。Android 的桌面红点 / 数字依赖系统通知与启动器，应用内数字仍正常显示。[Chrome 平台说明](https://developer.chrome.com/docs/capabilities/web-apis/badging-api)
+
+
+### 锁屏与后台可靠性
+
+NAS 持续按 60 秒周期同步，关闭 PWA 不会停止。正常新邮件提醒和 INBOX 缓存同事务写入持久队列，重启后恢复；网络故障、408 / 425 / 429 / 5xx 在 1 小时有效期内最多尝试 8 次，按退避 / Retry-After 重试。已被服务商接受的提醒不会为保活反复发送；重试用剩余 TTL 和当前未读数。容器保持 `restart:unless-stopped`；用户主动停止容器后应重新启动。
+
+“设置 → 应用与提醒 → 锁屏提醒设置”提供设备指引。Android 允许邮屿及所用浏览器锁屏通知、后台运行和后台联网，延迟时检查电池限制；不要强行停止浏览器。iPhone / iPad 16.4+ 添加主屏幕后打开并开启提醒，在系统通知中允许锁屏显示，检查专注模式。[Android 官方说明](https://web.dev/articles/push-notifications-faq)、[Apple 官方说明](https://webkit.org/blog/13878/web-push-for-web-apps-on-ios-and-ipados/)
+
+“设置 → 邮箱管理”上下移动账号并保存，顺序保存在服务器，导航和发件邮箱选择同步，新账号追加末尾。写信 / 回复 / 转发的“发件人名称”默认所选邮箱名称，可自行修改本次显示名，发件地址仍是所选邮箱。

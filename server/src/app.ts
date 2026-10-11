@@ -8,11 +8,11 @@ import { dirname, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import type { ServerResponse } from 'node:http';
 import webPush from 'web-push';
-import type { RequestOptions } from 'web-push';
 import { type Config, loadConfig, repoRoot, frontendBuilt } from './config.js';
 import { Store, type UserRow, type AccountRow, type MessageRow, accountDto, summaryDto, userDto } from './db.js';
 import { ApiError, hashPassword, verifyPassword, hashToken, randomToken, safeMailError } from './security.js';
 import { MailService, findFolder, googleToken, googleIdentity } from './mail.js';
+import { PushDeliveryQueue, pushDeliveryOptions } from './push.js';
 
 interface Auth {user:UserRow;kind:'session'|'token';sessionId?:string;expiresAt?:number}
 declare module 'fastify' { interface FastifyRequest { auth:Auth|null } }
@@ -22,7 +22,7 @@ const serverSchema=z.object({host:z.string().trim().min(1).max(253),port:portSch
 const accountSchema=z.object({name:z.string().trim().min(1).max(80),email:z.email().max(254),color:z.string().regex(/^#[a-f\d]{6}$/i).default('#6d5ce8'),provider:z.enum(['gmail','imap']),username:z.string().trim().min(1).max(254),password:z.string().min(1).max(1024),smtpUsername:z.string().trim().min(1).max(254).optional(),smtpPassword:z.string().min(1).max(1024).optional(),imap:serverSchema,smtp:serverSchema}).strict();
 const accountUpdateSchema=z.object({name:z.string().trim().min(1).max(80).optional(),email:z.email().max(254).optional(),color:z.string().regex(/^#[a-f\d]{6}$/i).optional(),username:z.string().trim().min(1).max(254).optional(),password:z.string().max(1024).optional(),smtpUsername:z.string().trim().min(1).max(254).nullable().optional(),smtpPassword:z.string().max(1024).nullable().optional(),imap:serverSchema.strict().optional(),smtp:serverSchema.strict().optional()}).strict().refine(input=>Object.keys(input).length>0,'至少提供一个修改字段');
 const headerText=z.string().max(998).refine(value=>!/[\r\n\x00]/.test(value),'邮件头字段不能包含换行');
-const sendSchema=z.object({accountId:z.string().max(100),to:headerText.min(3),cc:headerText.optional(),bcc:headerText.optional(),subject:headerText,text:z.string().max(2*1024*1024),inReplyTo:headerText.optional(),references:headerText.optional(),attachments:z.array(z.object({filename:z.string().min(1).max(255).refine(v=>!/[\r\n\x00]/.test(v)),contentType:z.string().max(120).regex(/^[\w.+-]+\/[\w.+-]+$/),content:z.string().max(28*1024*1024).regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/)}).strict()).max(20).optional()}).strict();
+const sendSchema=z.object({accountId:z.string().max(100),senderName:z.string().max(80).refine(value=>!/[\r\n\x00]/.test(value),'发件人名称不能包含换行').transform(value=>value.trim()).optional(),to:headerText.min(3),cc:headerText.optional(),bcc:headerText.optional(),subject:headerText,text:z.string().max(2*1024*1024),inReplyTo:headerText.optional(),references:headerText.optional(),attachments:z.array(z.object({filename:z.string().min(1).max(255).refine(v=>!/[\r\n\x00]/.test(v)),contentType:z.string().max(120).regex(/^[\w.+-]+\/[\w.+-]+$/),content:z.string().max(28*1024*1024).regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/)}).strict()).max(20).optional()}).strict();
 const pushSchema=z.object({endpoint:z.url().max(2048),keys:z.object({p256dh:z.string().regex(/^[A-Za-z0-9_-]{87,90}={0,2}$/),auth:z.string().regex(/^[A-Za-z0-9_-]{22}={0,2}$/)}).strict()}).strict();
 const trustedPushHosts=['fcm.googleapis.com','updates.push.services.mozilla.com','push.services.mozilla.com','web.push.apple.com','wns.windows.com'];
 function validatePushEndpoint(endpoint:string) {
@@ -30,10 +30,6 @@ function validatePushEndpoint(endpoint:string) {
   if(url.protocol!=='https:'||url.username||url.password||url.port||!trustedPushHosts.some(host=>url.hostname===host||url.hostname.endsWith(`.${host}`)))throw new ApiError(400,'INVALID_PUSH_ENDPOINT','仅支持浏览器提供的 HTTPS 推送服务地址。');
 }
 function pushStatus(error:unknown) {return error&&typeof error==='object'?(error as {statusCode?:number}).statusCode:undefined;}
-function pushDeliveryOptions(notificationId:string):RequestOptions {
-  // Give an idle device time to reconnect without collapsing separate batches.
-  return{TTL:3600,timeout:10_000,contentEncoding:'aes128gcm',urgency:'high',topic:createHash('sha256').update(notificationId).digest('base64url').slice(0,32)};
-}
 interface EventClient {response:ServerResponse;sessionId:string;userId:string;expiresAt:number}
 
 export async function buildApp(config:Config=loadConfig()) {
@@ -50,24 +46,24 @@ export async function buildApp(config:Config=loadConfig()) {
   };
   const closeUserEvents=(userId:string,sessionId?:string)=>{for(const client of clients)if(client.userId===userId&&(!sessionId||client.sessionId===sessionId)){client.response.end();clients.delete(client);}};
   if(config.vapidPublicKey&&config.vapidPrivateKey)webPush.setVapidDetails(config.vapidSubject,config.vapidPublicKey,config.vapidPrivateKey);
-  async function notify(userId:string,accountId:string,count:number,notificationId:string=randomUUID()) {
-    if(!config.vapidPublicKey||!config.vapidPrivateKey)return;
-    const rows=store.db.prepare('SELECT endpoint,subscription FROM push_subscriptions WHERE user_id=?').all(userId) as {endpoint:string;subscription:string}[];
-    const payload=JSON.stringify({title:'MailNest 新邮件',body:`有 ${count} 封新邮件等待查看`,url:`/?account=${encodeURIComponent(accountId)}`,tag:`mail-${accountId}`,notificationId,unreadCount:unreadCount(userId)});
-    await Promise.allSettled(rows.map(async row=>{
-      const subscriptionId=createHash('sha256').update(row.endpoint).digest('hex').slice(0,12);
-      try {
-        const response=await webPush.sendNotification(JSON.parse(row.subscription),payload,pushDeliveryOptions(notificationId));
-        app.log.info({notificationId,accountId,subscriptionId,statusCode:response.statusCode},'New-mail push accepted');
-      } catch(error) {
-        const code=pushStatus(error),expired=code===404||code===410;
-        if(expired)store.db.prepare('DELETE FROM push_subscriptions WHERE endpoint=? AND user_id=? AND subscription=?').run(row.endpoint,userId,row.subscription);
-        // Provider errors can contain full endpoint URLs and authorization keys.
-        app.log.warn({notificationId,accountId,subscriptionId,statusCode:typeof code==='number'?code:undefined,category:expired?'PUSH_SUBSCRIPTION_EXPIRED':'PUSH_DELIVERY_FAILED'},'New-mail push failed');
-      }
-    }));
+  const pushQueue=new PushDeliveryQueue({store,logger:app.log,send:async(subscription,payload,options)=>{
+    // A retry can happen after mail has been read elsewhere. Refresh the badge
+    // from the current owner-scoped inbox total rather than replaying an old one.
+    const data=JSON.parse(String(payload)) as {tag:string;unreadCount:number};
+    const owner=data.tag?.startsWith('mail-')?store.account(data.tag.slice(5))?.user_id:undefined;
+    if(owner)data.unreadCount=unreadCount(owner);
+    return webPush.sendNotification(subscription,JSON.stringify(data),options);
+  }});
+  function notification(userId:string,accountId:string,count:number,notificationId:string) {
+    return{userId,accountId,notificationId,payload:JSON.stringify({title:'MailNest 新邮件',body:`有 ${count} 封新邮件等待查看`,url:`/?account=${encodeURIComponent(accountId)}`,tag:`mail-${accountId}`,notificationId,unreadCount:unreadCount(userId)})};
   }
-  const mail=new MailService(store,config,emit,notify);
+  function stageNotification(userId:string,accountId:string,count:number,notificationId:string) {
+    if(config.vapidPublicKey&&config.vapidPrivateKey)pushQueue.stage(notification(userId,accountId,count,notificationId));
+  }
+  async function notify(userId:string,accountId:string,count:number,notificationId:string=randomUUID()) {
+    if(config.vapidPublicKey&&config.vapidPrivateKey)await pushQueue.enqueue(notification(userId,accountId,count,notificationId));
+  }
+  const mail=new MailService(store,config,emit,notify,stageNotification);
   const loginAttempts=new Map<string,{count:number;until:number}>();
   const pushTestAttempts=new Map<string,number>();
   const cookieOptions={httpOnly:true,secure:config.appUrl.startsWith('https:'),sameSite:'lax' as const,path:'/api',maxAge:7*24*60*60};
@@ -138,6 +134,15 @@ export async function buildApp(config:Config=loadConfig()) {
   });
   app.get(`${prefix}/config`,async()=>({googleConfigured:!!(config.googleClientId&&config.googleClientSecret),pushPublicKey:config.vapidPublicKey||null,pollingInterval:config.syncIntervalSeconds}));
   app.get(`${prefix}/accounts`,async request=>({accounts:store.accounts(request.auth!.user.id).map(row=>accountDto(row,mail.cachedFolders(row.id),mail.authInfo(row)))}));
+  app.patch(`${prefix}/accounts/order`,async request=>{
+    const input=z.object({accountIds:z.array(z.string().min(1).max(100)).max(20)}).strict().parse(request.body);
+    const rows=store.accounts(request.auth!.user.id),ids=new Set(input.accountIds);
+    if(ids.size!==input.accountIds.length||rows.length!==ids.size||rows.some(row=>!ids.has(row.id)))throw new ApiError(400,'ACCOUNT_ORDER_INVALID','邮箱列表已变化，请刷新后重新排序。');
+    store.db.exec('BEGIN IMMEDIATE');
+    try{const update=store.db.prepare('UPDATE accounts SET sort_order=? WHERE id=? AND user_id=?');input.accountIds.forEach((id,index)=>update.run(index,id,request.auth!.user.id));store.db.exec('COMMIT');}
+    catch(error){store.db.exec('ROLLBACK');throw error;}
+    return{accounts:store.accounts(request.auth!.user.id).map(row=>accountDto(row,mail.cachedFolders(row.id),mail.authInfo(row)))};
+  });
   app.post(`${prefix}/accounts`,async(request,reply)=>{
     const input=accountSchema.parse(request.body);
     if(input.provider==='gmail' && (input.imap.host.toLowerCase()!=='imap.gmail.com'||input.smtp.host.toLowerCase()!=='smtp.gmail.com'||input.username.toLowerCase()!==input.email.toLowerCase()||(input.smtpUsername&&input.smtpUsername.toLowerCase()!==input.email.toLowerCase())))throw new ApiError(400,'GMAIL_SETTINGS','Google 邮箱需使用 imap.gmail.com / smtp.gmail.com，且用户名与邮箱地址一致。');
@@ -281,9 +286,9 @@ export async function buildApp(config:Config=loadConfig()) {
   let heartbeat:ReturnType<typeof setInterval>|undefined;
   app.addHook('onListen',async()=>{
     heartbeat=setInterval(()=>{for(const client of clients){const valid=client.expiresAt>Date.now()&&store.db.prepare('SELECT id FROM sessions WHERE id=?').get(client.sessionId);if(!valid){client.response.end();clients.delete(client);}else client.response.write(': heartbeat\n\n');}},25_000);heartbeat.unref();
-    if(config.background){for(const row of store.accounts())mail.schedule(row.id);poll=setInterval(()=>{store.cleanup();for(const row of store.accounts())mail.schedule(row.id);},config.syncIntervalSeconds*1000);poll.unref();}
+    if(config.background){if(config.vapidPublicKey&&config.vapidPrivateKey)pushQueue.start();for(const row of store.accounts())mail.schedule(row.id);poll=setInterval(()=>{store.cleanup();for(const row of store.accounts())mail.schedule(row.id);},config.syncIntervalSeconds*1000);poll.unref();}
   });
   app.addHook('preClose',async()=>{if(poll)clearInterval(poll);if(heartbeat)clearInterval(heartbeat);for(const client of clients)client.response.end();clients.clear();mail.stop();});
-  app.addHook('onClose',async()=>{await mail.close();store.close();});
-  return{app,store,mail};
+  app.addHook('onClose',async()=>{await mail.close();await pushQueue.stop();store.close();});
+  return{app,store,mail,pushQueue};
 }

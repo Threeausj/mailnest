@@ -6,14 +6,19 @@ import { bytesToAttachment, forwardSubject, forwardText, loadForwardAttachment, 
 import type { Account, DraftAttachment, Message } from './types';
 
 export default function Compose({ accounts, defaultAccount, reply, forward, onClose, onSent, onRegisterClose }: { accounts: Account[]; defaultAccount: string; reply: Message | null; forward: Message | null; onClose: () => void; onSent: (warning?: string) => void; onRegisterClose?: (close: (() => boolean) | null) => void }) {
-  const [initial] = useState(() => ({
-    accountId: (forward || reply)?.accountId || defaultAccount || accounts[0]?.id || '',
-    to: forward ? '' : reply?.from.address || '',
-    subject: forward ? forwardSubject(forward.subject) : reply ? (/^re:/i.test(reply.subject) ? reply.subject : `Re: ${reply.subject}`) : '',
-    text: forward ? forwardText(forward) : '',
-    sourceAttachments: forward?.attachments || [],
-  }));
+  const [initial] = useState(() => {
+    const accountId = (forward || reply)?.accountId || defaultAccount || accounts[0]?.id || '';
+    return {
+      accountId,
+      senderName: accounts.find((account) => account.id === accountId)?.name || '',
+      to: forward ? '' : reply?.from.address || '',
+      subject: forward ? forwardSubject(forward.subject) : reply ? (/^re:/i.test(reply.subject) ? reply.subject : `Re: ${reply.subject}`) : '',
+      text: forward ? forwardText(forward) : '',
+      sourceAttachments: forward?.attachments || [],
+    };
+  });
   const [accountId, setAccountId] = useState(initial.accountId);
+  const [senderName, setSenderName] = useState(initial.senderName);
   const [to, setTo] = useState(initial.to);
   const [cc, setCc] = useState('');
   const [bcc, setBcc] = useState('');
@@ -40,7 +45,7 @@ export default function Compose({ accounts, defaultAccount, reply, forward, onCl
   const limitError = attachmentCount > MAX_ATTACHMENT_COUNT ? '一封邮件最多添加 20 个附件，请移除部分原邮件附件。' : totalBytes > MAX_ATTACHMENT_BYTES ? '附件总大小不能超过 20 MB，请移除部分原邮件附件。' : '';
   function close() {
     if (request.current || attachmentRead.current) return false;
-    const changed = accountId !== initial.accountId || to !== initial.to || cc.trim() || bcc.trim() || subject !== initial.subject || text !== initial.text || attachments.length || sourceAttachments.length !== initial.sourceAttachments.length;
+    const changed = accountId !== initial.accountId || senderName !== initial.senderName || to !== initial.to || cc.trim() || bcc.trim() || subject !== initial.subject || text !== initial.text || attachments.length || sourceAttachments.length !== initial.sourceAttachments.length;
     if (changed && !window.confirm('关闭后，此封邮件的草稿将被丢弃。确定关闭？')) return false;
     onClose();
     return true;
@@ -95,7 +100,7 @@ export default function Compose({ accounts, defaultAccount, reply, forward, onCl
       }
       if (controller.signal.aborted || !mounted.current) return;
       const result = await api<{ ok: true; messageId: string; warning?: string }>('/messages/send', { method: 'POST', signal: controller.signal, body: JSON.stringify({
-        accountId, to: to.replace(/[，；;]/g, ','), cc: cc.replace(/[，；;]/g, ','), bcc: bcc.replace(/[，；;]/g, ','), subject: subject.trim(), text,
+        accountId, senderName: senderName.trim() || accounts.find((account) => account.id === accountId)?.name || '', to: to.replace(/[，；;]/g, ','), cc: cc.replace(/[，；;]/g, ','), bcc: bcc.replace(/[，；;]/g, ','), subject: subject.trim(), text,
         ...(!forward && reply?.messageId ? { inReplyTo: reply.messageId, references: reply.messageId } : {}),
         attachments: readyAttachments.map(({ filename, contentType, content }) => ({ filename, contentType, content })),
       }) });
@@ -104,7 +109,8 @@ export default function Compose({ accounts, defaultAccount, reply, forward, onCl
     finally { request.current = null; if (mounted.current) { setBusy(false); setPreparing(false); } }
   }
   return <Modal title={forward ? '转发邮件' : reply ? '回复邮件' : '写一封新邮件'} subtitle="把想说的话，认真送达。" onClose={close} wide><form className="compose-form" onSubmit={send}>
-    <label className="compose-row"><span>发件人</span><select aria-label="发件人" value={accountId} onChange={(e) => setAccountId(e.target.value)} required disabled={busy}>{accounts.map((account) => <option value={account.id} key={account.id}>{account.name} &lt;{account.email}&gt;</option>)}</select><ChevronDown size={14} className="select-decoration" /></label>
+    <label className="compose-row"><span>发件人</span><select aria-label="发件人" value={accountId} onChange={(e) => { setAccountId(e.target.value); setSenderName(accounts.find((account) => account.id === e.target.value)?.name || ''); }} required disabled={busy}>{accounts.map((account) => <option value={account.id} key={account.id}>{account.name} &lt;{account.email}&gt;</option>)}</select><ChevronDown size={14} className="select-decoration" /></label>
+    <label className="compose-row"><span>发件人名称</span><input value={senderName} onChange={(e) => setSenderName(e.target.value)} maxLength={80} placeholder={accounts.find((account) => account.id === accountId)?.name || '发件人名称'} disabled={busy} autoComplete="off" /></label>
     <label className="compose-row"><span>收件人</span><input required value={to} onChange={(e) => setTo(e.target.value)} placeholder="name@example.com" disabled={busy} autoComplete="off" /><button type="button" className="text-button" onClick={() => setShowCopies(!showCopies)}>{showCopies ? '收起' : '抄送 / 密送'}</button></label>
     {showCopies && <><label className="compose-row"><span>抄送</span><input value={cc} onChange={(e) => setCc(e.target.value)} placeholder="多个地址以英文逗号分隔" disabled={busy} /></label><label className="compose-row"><span>密送</span><input value={bcc} onChange={(e) => setBcc(e.target.value)} placeholder="密送地址不会向其他收件人显示" disabled={busy} /></label></>}
     <label className="compose-row"><span>主题</span><input required maxLength={500} value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="给这封邮件一个主题" disabled={busy} /></label>

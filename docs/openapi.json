@@ -354,7 +354,8 @@
           "500": {
             "$ref": "#/components/responses/ServerError"
           }
-        }
+        },
+        "description": "按已保存的账号顺序返回；升级时已有账号默认按名称稳定排列，新增账号追加到末尾。"
       },
       "post": {
         "operationId": "createAccount",
@@ -1258,7 +1259,7 @@
             }
           }
         },
-        "description": "SMTP 至少接受一个收件人后返回成功；部分收件人被拒绝时通过 warning 提示，全部拒绝时返回错误。普通 IMAP 账号尽力保存远端已发送副本，失败仍返回 ok=true 和 warning；Gmail 由服务商自动保存避免重复副本。网络中断后 SMTP 可能已接受邮件，接口没有幂等键，重试前确认避免重复投递。"
+        "description": "SMTP 至少接受一个收件人后返回成功；部分收件人被拒绝时通过 warning 提示，全部拒绝时返回错误。普通 IMAP 账号尽力保存远端已发送副本，失败仍返回 ok=true 和 warning；Gmail 由服务商自动保存避免重复副本。网络中断后 SMTP 可能已接受邮件，接口没有幂等键，重试前确认避免重复投递。 可选 senderName 仅覆盖本次 MIME From 显示名称；默认所选账号 name，发件地址及 SMTP 身份保持该账号。"
       }
     },
     "/oauth/google/start": {
@@ -1881,6 +1882,62 @@
           }
         }
       }
+    },
+    "/accounts/order": {
+      "patch": {
+        "operationId": "orderAccounts",
+        "tags": [
+          "邮箱"
+        ],
+        "summary": "保存邮箱账号的显示顺序",
+        "description": "原子保存本人全部账号的顺序，跨设备与刷新保持。重复、遗漏、他人或已删除的 ID 返回 400 ACCOUNT_ORDER_INVALID，不做部分写入。新建账号追加到末尾；更改名称不会移动已保存的位置。此操作不连接远端或改变邮箱配置。",
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uri"
+            },
+            "description": "Cookie 会话写操作（包括登录）必须提供与 APP_URL 相同的 Origin；独立 Bearer 令牌请求不要求该头。"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AccountOrderRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2143,7 +2200,8 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/Account"
-            }
+            },
+            "description": "按当前使用者保存的显示顺序排列；导航、设置和发件邮箱选择使用相同顺序。"
           }
         },
         "required": [
@@ -2589,6 +2647,12 @@
               "$ref": "#/components/schemas/SendAttachment"
             },
             "maxItems": 20
+          },
+          "senderName": {
+            "type": "string",
+            "maxLength": 80,
+            "pattern": "^[^\\r\\n\\u0000]*$",
+            "description": "本次发信的显示名称，去除首尾空白；省略或空白使用所选账号 name。不会更改账号配置、SMTP 登录或发件邮箱地址，地址始终来自 accountId 对应账号。"
           }
         },
         "required": [
@@ -3044,7 +3108,7 @@
       },
       "PushNotification": {
         "type": "object",
-        "description": "正常新邮件与显式测试发送给 Service Worker 的 Web Push JSON。两者均含通知 UUID 并进入同一展示 / 去重路径；正常新邮件 ID 与对应 SSE 相同，测试 ID 独立且不改变未读数。统一 high urgency、TTL 3600 秒、aes128gcm，topic 按 ID 派生。",
+        "description": "正常邮件与测试均含 UUID，使用同一 Worker 展示 / 去重路径、high urgency、aes128gcm 和 ID 派生 topic。新邮件与 INBOX 缓存同事务持久入队，1 小时固定有效期内临时失败最多尝试 8 次，容器重启恢复；每次 TTL 为剩余秒数（最大 3600），接受后不再重发。测试仍即时单次投递、不自动入队重试。接受不保证设备送达。",
         "properties": {
           "title": {
             "type": "string"
@@ -3077,6 +3141,26 @@
           "tag",
           "unreadCount",
           "notificationId"
+        ]
+      },
+      "AccountOrderRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "accountIds": {
+            "type": "array",
+            "maxItems": 20,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            },
+            "description": "本人当前全部账号 ID，按期望顺序提供，每个恰好一次；无账号时为 []。"
+          }
+        },
+        "required": [
+          "accountIds"
         ]
       }
     },

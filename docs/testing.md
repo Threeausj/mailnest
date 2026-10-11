@@ -49,4 +49,9 @@
 通知测试与角标回归模拟当前设备订阅及投递响应，检查未登记不可测试、当前 endpoint 提交、临时失败重试、成功只提示“服务已接受”，关闭提醒清除测试提示。后端用临时数据库和受控 Web Push 验证投递对象、所有者隔离、限频、过期清理、错误脱敏与总未读数，不发送真实通知。浏览器用合成账号和 SSE 验证总未读数字 / 标题 / setAppBadge 更新、切换账号仍保留总计、平板 / 窄栏铃铛收起时更多按钮与提醒菜单保留可见数字、0 和退出登录清除、不支持或拒绝 Badging 静默；隔离 Worker 实际执行构建后的 Service Worker，检查 push 中合法数字、零值、缺失 / 非法字段及 API 失败均不影响可见通知。自动测试不能替代真实设备的系统角标与推送送达验收。
 
 
-推送投递参数回归需验证普通与测试均为 `urgency:high`、`TTL:3600`、`contentEncoding:aes128gcm`，同批次共享 topic、不同批次不相互替换；测试 UUID 与正常提醒经过同一 Worker 路径。Worker 更新回归见 `tests/worker-update.spec.ts`，模拟 register 返回前已经发出 updatefound、当前 installing / waiting、回前台重新检查和失败后重试；不得强制刷新导致草稿丢失。
+推送投递参数回归需验证普通与测试均为 `urgency:high`、首次 `TTL:3600`（队列重试为剩余 TTL）、`contentEncoding:aes128gcm`，同批次共享 topic、不同批次不相互替换；测试 UUID 与正常提醒经过同一 Worker 路径。Worker 更新回归见 `tests/worker-update.spec.ts`，模拟 register 返回前已经发出 updatefound、当前 installing / waiting、回前台重新检查和失败后重试；不得强制刷新导致草稿丢失。
+
+
+后台可靠性回归见 `server/test/push-outbox.test.ts`：真实 SQLite 队列、模拟 provider，覆盖同事务 stage 回滚、重开数据库恢复、永久失败 / 过期 / 8次上限、4并发、退避抖动与 Retry-After、订阅更换 / 取消及旧410不误删新密钥、停机等待在途任务、整次发送 12 秒总超时与迟到结果不回写数据库、有界保留和日志脱敏。邮件同步测试另覆盖 INBOX 提交后停止其他目录、重开 Store 时 pending 已存在，stage异常回滚缓存与基线。应用层回归验证重试保持 UUID / topic 并用当前未读数。所有发送均模拟。
+
+账号排序回归覆盖完整 owned ID 验证、原子保存、改名保留顺序、新账号追加、重开数据库持久与跨用户隔离；前端覆盖保存失败保留调整、重试成功、刷新导航和发件选择保持顺序，以及侧栏实际紧凑间距。发件名回归使用真实 MIME Composer + mock SMTP 检查默认 / 自定义名称、Unicode引号及发件地址和 SMTP envelope 不变；三端检查切换邮箱默认名称、编辑保留草稿和回复 / 转发，拒绝邮件头换行注入，不发送真实邮件。锁屏指引与返回系统设置后检查现有订阅的测试使用合成权限、无授权弹窗或新订阅。
