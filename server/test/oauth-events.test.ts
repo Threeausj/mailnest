@@ -64,7 +64,7 @@ test('SSE sends ready, logout closes only the revoked session and shutdown close
     const event=async(cookie:string)=>{
       const response=await fetch(`${address}/api/v1/events`,{headers:{cookie},signal:AbortSignal.timeout(5_000)});
       assert.equal(response.status,200);assert.match(response.headers.get('content-type')||'',/^text\/event-stream/);assert.equal(response.headers.get('cache-control'),'no-store');assert.equal(response.headers.get('x-accel-buffering'),'no');
-      const reader=response.body!.getReader();const chunk=await reader.read();assert.equal(chunk.done,false);assert.match(new TextDecoder().decode(chunk.value),/event: ready\ndata: \{\}/);return reader;
+      const reader=response.body!.getReader();const chunk=await reader.read();assert.equal(chunk.done,false);assert.match(new TextDecoder().decode(chunk.value),/event: ready\ndata: \{"unreadCount":0\}/);return reader;
     };
     firstReader=await event(first);secondReader=await event(second);
     const logout=await project.app.inject({method:'POST',url:'/api/v1/auth/logout',headers:{cookie:first,origin},payload:{}});assert.equal(logout.statusCode,200);

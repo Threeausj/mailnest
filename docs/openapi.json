@@ -1400,7 +1400,7 @@
                 "schema": {
                   "type": "string"
                 },
-                "example": "event: ready\ndata: {}\n\nevent: mail\ndata: {\"accountId\":\"account-id\",\"count\":1}\n\n"
+                "example": "event: ready\ndata: {\"unreadCount\":3}\n\nevent: mail\ndata: {\"accountId\":\"account-id\",\"count\":1,\"unreadCount\":4}\n\n"
               }
             }
           },
@@ -1425,7 +1425,7 @@
             "sessionCookie": []
           }
         ],
-        "description": "当前用户会话订阅；浏览器 EventSource 使用 Cookie。事件 ready:{}、mail:{accountId,count}、sync:{accountId,status}，status 为 syncing / connected / partial / error；partial 表示部分目录失败，可刷新账号查询 error 中的原因。新邮件通知只在后续同步发现新邮件时产生。每用户最多 10 条并发连接，每 25 秒保活；会话过期 / 注销 / 修改密码时关闭连接。连接中断后客户端可重新连接；事件不保证持久重放。"
+        "description": "当前用户会话订阅；浏览器 EventSource 使用 Cookie。事件 ready:{unreadCount}、mail:{accountId,count,unreadCount}、sync:{accountId,status,unreadCount}，status 为 syncing / connected / partial / error；partial 表示部分目录失败，可刷新账号查询 error 中的原因。新邮件通知只在后续同步发现新邮件时产生。每用户最多 10 条并发连接，每 25 秒保活；会话过期 / 注销 / 修改密码时关闭连接。连接中断后客户端可重新连接；事件不保证持久重放。 unreadCount 为本人全部账号最近取得的 INBOX 未读数之和；不按缓存邮件或多个标签双计，0 可清除角标。事件数据结构见 ReadyEvent / MailEvent / SyncEvent。"
       }
     },
     "/push/subscriptions": {
@@ -1768,6 +1768,116 @@
           },
           "500": {
             "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    },
+    "/push/test": {
+      "post": {
+        "operationId": "testPushNotification",
+        "tags": [
+          "提醒"
+        ],
+        "summary": "向本人指定的已登记设备发送一次测试通知",
+        "description": "显式测试仅发送到请求指定且属于当前用户的 endpoint，不群发，不创造邮件或修改未读状态。成功仅表示 Web Push 服务商接受请求，不保证设备送达或系统显示。使用保存的订阅密钥；本人未知和他人 endpoint 均返回 404。浏览器服务商 HTTPS 白名单及 TLS 证书校验沿用订阅，无 DNS/IP 预检。服务商 404/410 删除该设备的过期订阅并返回 410；其他错误保留订阅并返回安全的 503 文案，不暴露 endpoint/keys/服务商错误。每用户所有设备共用 15 秒测试间隔，失败也计入。Cookie 写操作要求 Origin；独立 API 令牌按当前用户限定。Push JSON 结构见 PushNotification。",
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uri"
+            },
+            "description": "Cookie 会话写操作（包括登录）必须提供与 APP_URL 相同的 Origin；独立 Bearer 令牌请求不要求该头。"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PushTestRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "推送服务已接受测试请求；不表示设备已送达。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PushTestResponse"
+                },
+                "example": {
+                  "ok": true,
+                  "accepted": true
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "PUSH_SUBSCRIPTION_NOT_FOUND：设备尚未登记或不属于当前用户。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "PUSH_SUBSCRIPTION_EXPIRED：服务商返回 404/410，过期订阅已移除；重新开启提醒。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "PUSH_TEST_RATE_LIMIT：同一用户每 15 秒最多一次测试；失败也占用间隔。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "距离下次可测试还需等待的秒数。",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 15
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          },
+          "503": {
+            "description": "PUSH_NOT_CONFIGURED：缺少 VAPID 配置；PUSH_DELIVERY_FAILED：推送服务暂时无法接受请求，订阅保留，可稍后重试。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }
@@ -2724,11 +2834,17 @@
           "count": {
             "type": "integer",
             "minimum": 1
+          },
+          "unreadCount": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "本人所有邮箱最近取得的远端收件箱未读数之和 SUM(accounts.unread)，不重复统计标签或缓存邮件行。0 表示可清除应用角标。"
           }
         },
         "required": [
           "accountId",
-          "count"
+          "count",
+          "unreadCount"
         ]
       },
       "SyncEvent": {
@@ -2745,11 +2861,17 @@
               "syncing",
               "partial"
             ]
+          },
+          "unreadCount": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "本人所有邮箱最近取得的远端收件箱未读数之和 SUM(accounts.unread)，不重复统计标签或缓存邮件行。0 表示可清除应用角标。"
           }
         },
         "required": [
           "accountId",
-          "status"
+          "status",
+          "unreadCount"
         ]
       },
       "Folder": {
@@ -2862,6 +2984,88 @@
           "account",
           "cacheReset"
         ]
+      },
+      "PushTestRequest": {
+        "type": "object",
+        "properties": {
+          "endpoint": {
+            "type": "string",
+            "format": "uri",
+            "maxLength": 2048,
+            "description": "浏览器提供且已属于当前用户的 HTTPS 推送服务地址。"
+          }
+        },
+        "required": [
+          "endpoint"
+        ],
+        "additionalProperties": false
+      },
+      "PushTestResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "accepted": {
+            "type": "boolean",
+            "enum": [
+              true
+            ],
+            "description": "服务商已接受；不保证送达或显示。"
+          }
+        },
+        "required": [
+          "ok",
+          "accepted"
+        ],
+        "additionalProperties": false
+      },
+      "ReadyEvent": {
+        "type": "object",
+        "properties": {
+          "unreadCount": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "本人所有邮箱最近取得的远端收件箱未读数之和 SUM(accounts.unread)，不重复统计标签或缓存邮件行。0 表示可清除应用角标。"
+          }
+        },
+        "required": [
+          "unreadCount"
+        ]
+      },
+      "PushNotification": {
+        "type": "object",
+        "description": "正常新邮件与显式测试发送给 Service Worker 的 Web Push JSON；测试不会改变未读数。",
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string",
+            "description": "站内目标路径。"
+          },
+          "tag": {
+            "type": "string"
+          },
+          "unreadCount": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "本人所有邮箱最近取得的远端收件箱未读数之和 SUM(accounts.unread)，不重复统计标签或缓存邮件行。0 表示可清除应用角标。"
+          }
+        },
+        "required": [
+          "title",
+          "body",
+          "url",
+          "tag",
+          "unreadCount"
+        ]
       }
     },
     "responses": {
@@ -2916,7 +3120,7 @@
         }
       },
       "RateLimited": {
-        "description": "登录尝试过多（最多 5 次失败后等 10 分钟）或同时打开的 SSE 连接超过每用户 10 条上限。",
+        "description": "登录尝试过多（最多 5 次失败后等 10 分钟）、同时打开的 SSE 连接超过每用户 10 条，或测试通知超过每用户 15 秒一次。",
         "content": {
           "application/json": {
             "schema": {
@@ -2946,7 +3150,7 @@
         }
       },
       "Unavailable": {
-        "description": "服务正在关闭，或 Google / Web Push 尚未配置。",
+        "description": "服务正在关闭、Google / Web Push 尚未配置，或推送服务暂时无法接受测试通知。",
         "content": {
           "application/json": {
             "schema": {

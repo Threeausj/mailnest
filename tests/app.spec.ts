@@ -58,6 +58,23 @@ async function mockMailbox(page: Page, messages: Message[] = []) {
   });
 }
 
+async function mockMailboxEvents(page: Page) {
+  await page.addInitScript(() => {
+    class MailboxEventSource extends EventTarget {
+      readyState = 1;
+      constructor(public url: string) {
+        super();
+        (window as any).__mailboxEventSource = this;
+      }
+      close() { this.readyState = 2; }
+    }
+    Object.defineProperty(window,'EventSource',{value:MailboxEventSource,configurable:true});
+    (window as any).__emitMailboxEvent = (type: string, data: unknown = {}) => {
+      (window as any).__mailboxEventSource?.dispatchEvent(new MessageEvent(type,{data:JSON.stringify(data)}));
+    };
+  });
+}
+
 test('real login, account setup, API token access/revocation, documentation and logout', async ({ page }) => {
   const tokenName = `E2E-${test.info().project.name}-${Date.now()}`;
   await login(page);
@@ -778,7 +795,57 @@ test('long mail subjects stay compact, with enough visible rows and usable star 
   await expect.poll(() => overviewScroll.evaluate(element => Math.abs(element.scrollTop - 160))).toBeLessThanOrEqual(2);
 });
 
-test('compact reader chrome scrolls away with the message and changing mail starts at the top', async ({ page }) => {
+test('delayed background sync keeps existing mail rows mounted and retains list scroll until the new response arrives', async ({ page }) => {
+  if (test.info().project.name === 'tablet') await page.setViewportSize({width:1097,height:600});
+  const messages = mailboxMessages(18).map(message => ({...message,unread:false}));
+  await mockMailboxEvents(page);
+  await mockMailbox(page,messages);
+  let listRequests = 0;
+  let release = () => {};
+  let delayed = false;
+  await page.route('**/api/v1/messages?**',async route => {
+    listRequests++;
+    if (delayed) await new Promise<void>(resolve => { release = resolve; });
+    await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({messages,total:messages.length,page:1,pageSize:30})});
+  });
+  await page.goto('/');
+  await expect(page.locator('.message-row')).toHaveCount(18);
+  const listScroll = page.viewportSize()!.width >= 1024 ? page.locator('.message-list-scroll') : page.locator('.workspace-scroll');
+  await listScroll.evaluate(element => { element.scrollTop = 160; });
+  await expect.poll(() => listScroll.evaluate(element => element.scrollTop)).toBe(160);
+  await page.evaluate(() => {
+    (window as any).__originalMailRow = document.querySelector('.message-row');
+    (window as any).__removedMailRows = 0;
+    (window as any).__syncSpinnerSeen = false;
+    new MutationObserver(records => {
+      for (const record of records) for (const node of record.removedNodes) {
+        if (!(node instanceof Element)) continue;
+        (window as any).__removedMailRows += (node.matches('.message-row') ? 1 : 0) + node.querySelectorAll('.message-row').length;
+      }
+      if (document.querySelector('.list-loading')) (window as any).__syncSpinnerSeen = true;
+    }).observe(document.querySelector('.workspace-scroll')!,{childList:true,subtree:true});
+  });
+  const originalRequests = listRequests;
+  delayed = true;
+  await page.evaluate(() => (window as any).__emitMailboxEvent('sync',{}));
+  await expect.poll(() => listRequests).toBeGreaterThan(originalRequests);
+  try {
+    await expect(page.locator('.message-row')).toHaveCount(18);
+    await expect(page.locator('.list-loading')).toHaveCount(0);
+    expect(await page.evaluate(() => (window as any).__originalMailRow.isConnected && (window as any).__originalMailRow === document.querySelector('.message-row'))).toBe(true);
+    expect(await listScroll.evaluate(element => element.scrollTop)).toBe(160);
+    messages.push({...messages[0],id:'background-added',subject:'同步后的新增邮件'});
+    release();
+    await expect(page.locator('.message-row')).toHaveCount(19);
+    expect(await page.evaluate(() => ({removed:(window as any).__removedMailRows,spinner:(window as any).__syncSpinnerSeen,same:(window as any).__originalMailRow === document.querySelector('.message-row')}))).toEqual({removed:0,spinner:false,same:true});
+    expect(await listScroll.evaluate(element => element.scrollTop)).toBe(160);
+    await noHorizontalOverflow(page);
+  } finally {
+    release();
+  }
+});
+
+test('compact reader header stays fixed while metadata scrolls away and changing mail starts at the top', async ({ page }) => {
   const viewports = test.info().project.name === 'tablet'
     ? [{width:768,height:1024},{width:1280,height:800}]
     : [page.viewportSize()!];
@@ -808,8 +875,20 @@ test('compact reader chrome scrolls away with the message and changing mail star
       await expect.poll(() => scroll.evaluate(element => element.scrollTop)).toBeGreaterThan(500);
     };
     await scrollDown();
-    for (const selector of ['.workspace-header','.reader-toolbar','.message-heading','.message-sender-block']) {
+    for (const selector of ['.message-heading','.message-sender-block']) {
       await expect.poll(() => page.locator(selector).evaluate(element => element.getBoundingClientRect().bottom)).toBeLessThanOrEqual(0);
+    }
+    const fixedHeader = (await page.locator('.workspace-header').boundingBox())!;
+    expect(Math.abs(fixedHeader.y)).toBeLessThanOrEqual(1);
+    expect(fixedHeader.height).toBeLessThanOrEqual(mobile ? 88 : 48);
+    await expect(page.getByRole('toolbar',{name:'邮件操作',exact:true})).toBeInViewport();
+    await expect(page.locator('.workspace-heading')).toBeInViewport();
+    if (viewport.width >= 1024) {
+      const list = (await page.getByRole('region',{name:'邮件列表'}).boundingBox())!;
+      const divider = (await page.getByRole('separator',{name:'调整邮件列表宽度',exact:true}).boundingBox())!;
+      expect(Math.abs(list.y - fixedHeader.y - fixedHeader.height)).toBeLessThanOrEqual(1);
+      expect(Math.abs(divider.y - fixedHeader.y - fixedHeader.height)).toBeLessThanOrEqual(1);
+      expect(list.y + list.height).toBeLessThanOrEqual(viewport.height + 1);
     }
     await noHorizontalOverflow(page);
     const nextMail = page.getByRole('button',{name:`打开邮件：${messages[1].subject}`,exact:true});
@@ -995,7 +1074,8 @@ test('long HTML mail scrolls the workspace by wheel and touch while wide tables 
     await page.mouse.move(pointer.x,pointer.y);
     await page.mouse.wheel(0,750);
     await expect.poll(() => scroll.evaluate(element => element.scrollTop)).toBeGreaterThan(400);
-    await expect.poll(() => page.locator('.workspace-header').evaluate(element => element.getBoundingClientRect().bottom)).toBeLessThanOrEqual(0);
+    await expect.poll(() => page.locator('.workspace-header').evaluate(element => Math.abs(element.getBoundingClientRect().top))).toBeLessThanOrEqual(1);
+    await expect(page.getByRole('toolbar',{name:'邮件操作',exact:true})).toBeInViewport();
     if (viewport.width < 768) {
       await scroll.evaluate(element => {element.scrollTop = 0;});
       const session = await context.newCDPSession(page);
@@ -1415,6 +1495,148 @@ test('HTML mail preserves styled cards, responsive typography, buttons, table la
   await noHorizontalOverflow(page);
 });
 
+test('foreground application badges follow the total unread count across mailboxes, clear at zero and logout, and tolerate browser rejection', async ({ page }) => {
+  await page.addInitScript(() => {
+    const state = {calls:[] as {type:string,count?:number}[],current:0,reject:false};
+    (window as any).__badgeFixture = state;
+    Object.defineProperty(navigator,'setAppBadge',{configurable:true,value:async (count: number) => {
+      state.calls.push({type:'set',count});
+      if (state.reject) throw new Error('Fixture badge API rejected');
+      state.current = count;
+    }});
+    Object.defineProperty(navigator,'clearAppBadge',{configurable:true,value:async () => {
+      state.calls.push({type:'clear'});
+      if (state.reject) throw new Error('Fixture badge API rejected');
+      state.current = 0;
+    }});
+  });
+  await mockMailboxEvents(page);
+  await mockMailbox(page,mailboxMessages(1).map(message => ({...message,unread:false})));
+  const account = (id: string, name: string, unread: number): Account => ({
+    id,name,email:`${id}@example.com`,color:'#377a75',provider:'imap',username:`${id}@example.com`,
+    imap:{host:'imap.example.com',port:993,secure:true},smtp:{host:'smtp.example.com',port:465,secure:true},
+    status:'connected',lastSyncedAt:new Date().toISOString(),error:null,unread,
+  });
+  const accounts = [account('density-account','测试邮箱',2),account('other-account','其他邮箱',5)];
+  let holdNextAccounts = false;
+  let delayedAccountsStarted = false;
+  let releaseAccounts = () => {};
+  await page.route('**/api/v1/accounts',async route => {
+    const body = JSON.stringify({accounts});
+    if (holdNextAccounts) {
+      holdNextAccounts = false;
+      delayedAccountsStarted = true;
+      await new Promise<void>(resolve => { releaseAccounts = resolve; });
+    }
+    return route.fulfill({status:200,contentType:'application/json',body});
+  });
+  await page.route('**/api/v1/auth/logout',route => route.fulfill({status:200,contentType:'application/json',body:'{"ok":true}'}));
+  const browserErrors: string[] = [];
+  page.on('pageerror',error => browserErrors.push(error.message));
+  const badge = () => page.evaluate(() => ({...(window as any).__badgeFixture}));
+  await page.goto('/');
+  await expect.poll(async () => (await badge()).current).toBe(7);
+  await expect.poll(() => page.title()).toMatch(/^\(7\) /);
+  await expect(page.locator('.notification-settings .notification-count')).toHaveText('7');
+  if (test.info().project.name === 'mobile') await expect(page.locator('.mobile-bottom-nav .notification-count')).toHaveText('7');
+  const nav = page.getByRole('button',{name:'打开导航菜单',exact:true});
+  if (await nav.isVisible()) await nav.click();
+  await page.getByRole('button',{name:'展开 测试邮箱文件夹',exact:true}).click();
+  const scopedAccountsResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/api/v1/accounts');
+  await page.getByRole('navigation',{name:'测试邮箱文件夹',exact:true}).getByRole('button',{name:'收件箱',exact:true}).click();
+  await scopedAccountsResponse;
+  expect((await badge()).current).toBe(7);
+  accounts[1].unread = 3;
+  holdNextAccounts = true;
+  await page.evaluate(() => (window as any).__emitMailboxEvent('sync',{}));
+  await expect.poll(() => delayedAccountsStarted).toBe(true);
+  await page.evaluate(() => (window as any).__emitMailboxEvent('ready',{unreadCount:6}));
+  await expect.poll(async () => (await badge()).current).toBe(6);
+  await expect(page.locator('.notification-settings .notification-count')).toHaveText('6');
+  releaseAccounts();
+  // The sidebar confirms that the stale response was committed, while the newer SSE total still wins.
+  await expect(page.locator('.unified-folder-group .mailbox-folder').first().locator('b')).toHaveText('5');
+  expect((await badge()).current).toBe(6);
+  await expect(page.locator('.notification-settings .notification-count')).toHaveText('6');
+  await expect.poll(() => page.title()).toMatch(/^\(6\) /);
+  accounts[0].unread = 2; accounts[1].unread = 2;
+  await page.evaluate(() => (window as any).__emitMailboxEvent('sync',{}));
+  await expect.poll(async () => (await badge()).current).toBe(4);
+  await expect(page.locator('.notification-settings .notification-count')).toHaveText('4');
+  accounts[0].unread = 0; accounts[1].unread = 0;
+  await page.evaluate(() => (window as any).__emitMailboxEvent('sync',{}));
+  await expect.poll(async () => (await badge()).current).toBe(0);
+  expect((await badge()).calls.at(-1)).toEqual({type:'clear'});
+  await expect(page.locator('.notification-count')).toHaveCount(0);
+  await expect.poll(() => page.title()).not.toMatch(/^\(/);
+  await page.evaluate(() => { (window as any).__badgeFixture.reject = true; });
+  accounts[0].unread = 1; accounts[1].unread = 7;
+  await page.evaluate(() => (window as any).__emitMailboxEvent('sync',{}));
+  await expect.poll(async () => (await badge()).calls.at(-1)).toEqual({type:'set',count:8});
+  await expect(page.locator('.workspace-heading')).toBeVisible();
+  expect(browserErrors).toEqual([]);
+  await page.evaluate(() => { (window as any).__badgeFixture.reject = false; });
+  accounts[1].unread = 8;
+  await page.evaluate(() => (window as any).__emitMailboxEvent('sync',{}));
+  await expect.poll(async () => (await badge()).current).toBe(9);
+  await (await headerUtility(page,'邮件提醒设置')).click();
+  const settings = page.getByRole('dialog',{name:'设置',exact:true});
+  await settings.getByRole('tab',{name:'应用与提醒',exact:true}).click();
+  await settings.getByRole('button',{name:'退出登录',exact:true}).click();
+  await expect(page.getByRole('button',{name:'登录工作空间',exact:true})).toBeVisible();
+  await expect.poll(async () => (await badge()).current).toBe(0);
+  expect((await badge()).calls.at(-1)).toEqual({type:'clear'});
+  await expect.poll(() => page.title()).not.toMatch(/^\(/);
+  expect(browserErrors).toEqual([]);
+});
+
+test('push worker uses an exact unread number for the application badge and preserves the notification icon', async ({ page }) => {
+  await page.goto('/');
+  const workerSource = await (await page.request.get('/sw.js')).text();
+  const result = await page.evaluate(async source => {
+    const script = `
+      const calls = [], notifications = [];
+      let reject = false;
+      Object.defineProperty(navigator,'setAppBadge',{value:async count => {calls.push({type:'set',count}); if(reject)throw Error('Denied');}});
+      Object.defineProperty(navigator,'clearAppBadge',{value:async () => {calls.push({type:'clear'}); if(reject)throw Error('Denied');}});
+      self.registration = {showNotification:async (title, options) => {notifications.push({title,options});}};
+      ${source}
+      self.onmessage = async event => {
+        try {
+          for (const payload of event.data) {
+            const completion = [];
+            const push = new Event('push');
+            push.data = {json:() => payload};
+            push.waitUntil = promise => completion.push(Promise.resolve(promise));
+            reject = Boolean(payload.reject);
+            self.dispatchEvent(push);
+            await Promise.all(completion);
+          }
+          self.postMessage({calls,notifications});
+        } catch (error) { self.postMessage({error:String(error)}); }
+      };
+    `;
+    const url = URL.createObjectURL(new Blob([script],{type:'text/javascript'}));
+    const worker = new Worker(url);
+    try {
+      return await new Promise<any>((resolve,reject) => {
+        worker.onmessage = event => resolve(event.data);
+        worker.onerror = event => reject(new Error(event.message));
+        worker.postMessage([{unreadCount:3},{unreadCount:0},{body:'缺少未读数量'},{unreadCount:-1},{unreadCount:1.5},{unreadCount:5,reject:true,tag:'mailnest-test'}]);
+      });
+    } finally { worker.terminate(); URL.revokeObjectURL(url); }
+  },workerSource);
+  expect(result.error).toBeUndefined();
+  expect(result.calls).toEqual([{type:'set',count:3},{type:'clear'},{type:'set',count:5}]);
+  expect(result.notifications).toHaveLength(6);
+  for (const notification of result.notifications) {
+    expect(notification.options.icon).toBe('/icon-192.png');
+    expect(notification.options.badge).toBe('/icon-192.png');
+  }
+  expect(result.notifications.slice(0,-1).map((notification: any) => notification.options.tag)).toEqual(Array(5).fill('mailnest-new-mail'));
+  expect(result.notifications.at(-1).options.tag).toBe('mailnest-test');
+});
+
 test('existing push subscription requires server acknowledgment, retries and survives settings reopen before disable', async ({ page }) => {
   const publicKey = Buffer.concat([Buffer.from([4]),Buffer.alloc(64,1)]).toString('base64url');
   const subscription = {
@@ -1457,7 +1679,9 @@ test('existing push subscription requires server acknowledgment, retries and sur
   }));
   const registrations: unknown[] = [];
   const deletions: unknown[] = [];
+  const notificationTests: unknown[] = [];
   const releaseRegistrations = new Map<number,() => void>();
+  const releaseNotificationTests = new Map<number,() => void>();
   let releaseDeletion = () => {};
   await page.route('**/api/v1/push/subscriptions',async route => {
     const request = route.request();
@@ -1477,6 +1701,14 @@ test('existing push subscription requires server acknowledgment, retries and sur
     }
     return route.fulfill({status:405,contentType:'application/json',body:JSON.stringify({error:{code:'METHOD_NOT_ALLOWED',message:'Unexpected fixture method'}})});
   });
+  await page.route('**/api/v1/push/test',async route => {
+    notificationTests.push(route.request().postDataJSON());
+    const attempt = notificationTests.length;
+    await new Promise<void>(resolve => releaseNotificationTests.set(attempt,resolve));
+    return route.fulfill({status:attempt === 1 ? 503 : 200,contentType:'application/json',body:JSON.stringify(attempt === 1
+      ? {error:{code:'PUSH_TEST_SEND_FAILED',message:'测试推送服务暂时失败，请重试。'}}
+      : {ok:true,accepted:true})});
+  });
   const pushState = () => page.evaluate(() => ({...(window as any).__pushFixture}));
   await page.goto('/');
   await (await headerUtility(page,'邮件提醒设置')).click();
@@ -1487,6 +1719,8 @@ test('existing push subscription requires server acknowledgment, retries and sur
   await expect(settings.getByRole('button',{name:'检查中…',exact:true})).toBeDisabled();
   await expect(settings.getByText('本设备已开启后台邮件提醒。',{exact:true})).toHaveCount(0);
   await expect(settings.getByRole('button',{name:'关闭后台提醒',exact:true})).toHaveCount(0);
+  await expect(settings.getByRole('button',{name:'发送测试通知',exact:true})).toBeDisabled();
+  expect(notificationTests).toHaveLength(0);
   expect(await pushState()).toEqual({subscribeCalls:0,unsubscribeCalls:0,permissionCalls:0,localSubscribed:true});
   releaseRegistrations.get(1)!();
   await expect(settings.getByRole('alert')).toContainText('测试推送注册失败，请重试。');
@@ -1515,13 +1749,37 @@ test('existing push subscription requires server acknowledgment, retries and sur
   expect(await pushState()).toEqual({subscribeCalls:0,unsubscribeCalls:0,permissionCalls:1,localSubscribed:true});
   releaseRegistrations.get(3)!();
   await expect(settings.getByText('本设备已开启后台邮件提醒。',{exact:true})).toBeVisible();
+  const sendTest = settings.getByRole('button',{name:'发送测试通知',exact:true});
+  await expect(sendTest).toBeEnabled();
+  await sendTest.click();
+  await expect.poll(() => notificationTests.length).toBe(1);
+  expect(notificationTests).toEqual([{endpoint:subscription.endpoint}]);
+  await expect(settings.getByRole('button',{name:'发送中…',exact:true})).toBeDisabled();
+  for (const tab of await settings.getByRole('tab').all()) await expect(tab).toBeDisabled();
+  await expect(settings.getByText('推送服务已接受测试通知，请查看系统通知。',{exact:true})).toHaveCount(0);
+  releaseNotificationTests.get(1)!();
+  await expect(settings.getByRole('alert')).toContainText('测试推送服务暂时失败，请重试。');
+  await expect(settings.getByText('本设备已开启后台邮件提醒。',{exact:true})).toBeVisible();
+  await expect(sendTest).toBeEnabled();
+  for (const tab of await settings.getByRole('tab').all()) await expect(tab).toBeEnabled();
+  await sendTest.click();
+  await expect.poll(() => notificationTests.length).toBe(2);
+  await expect(settings.getByRole('button',{name:'发送中…',exact:true})).toBeDisabled();
+  releaseNotificationTests.get(2)!();
+  await expect(settings.getByText('推送服务已接受测试通知，请查看系统通知。',{exact:true})).toBeVisible();
+  await expect(settings.getByRole('alert')).toHaveCount(0);
+  expect(notificationTests).toEqual([{endpoint:subscription.endpoint},{endpoint:subscription.endpoint}]);
   await settings.getByRole('button',{name:'关闭后台提醒',exact:true}).click();
   await expect.poll(() => deletions.length).toBe(1);
   expect(deletions).toEqual([{endpoint:subscription.endpoint}]);
   await expect(settings.getByRole('button',{name:'处理中…',exact:true})).toBeDisabled();
+  for (const tab of await settings.getByRole('tab').all()) await expect(tab).toBeDisabled();
   expect(await pushState()).toMatchObject({unsubscribeCalls:0,localSubscribed:true});
   releaseDeletion();
   await expect(settings.getByRole('button',{name:'开启提醒',exact:true})).toBeEnabled();
+  for (const tab of await settings.getByRole('tab').all()) await expect(tab).toBeEnabled();
+  await expect(sendTest).toBeDisabled();
+  await expect(settings.getByText('推送服务已接受测试通知，请查看系统通知。',{exact:true})).toHaveCount(0);
   await expect(settings.getByText('本设备已开启后台邮件提醒。',{exact:true})).toHaveCount(0);
   expect(await pushState()).toEqual({subscribeCalls:0,unsubscribeCalls:1,permissionCalls:1,localSubscribed:false});
   expect(registrations).toHaveLength(3);

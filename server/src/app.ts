@@ -24,6 +24,11 @@ const headerText=z.string().max(998).refine(value=>!/[\r\n\x00]/.test(value),'�
 const sendSchema=z.object({accountId:z.string().max(100),to:headerText.min(3),cc:headerText.optional(),bcc:headerText.optional(),subject:headerText,text:z.string().max(2*1024*1024),inReplyTo:headerText.optional(),references:headerText.optional(),attachments:z.array(z.object({filename:z.string().min(1).max(255).refine(v=>!/[\r\n\x00]/.test(v)),contentType:z.string().max(120).regex(/^[\w.+-]+\/[\w.+-]+$/),content:z.string().max(28*1024*1024).regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/)}).strict()).max(20).optional()}).strict();
 const pushSchema=z.object({endpoint:z.url().max(2048),keys:z.object({p256dh:z.string().regex(/^[A-Za-z0-9_-]{87,90}={0,2}$/),auth:z.string().regex(/^[A-Za-z0-9_-]{22}={0,2}$/)}).strict()}).strict();
 const trustedPushHosts=['fcm.googleapis.com','updates.push.services.mozilla.com','push.services.mozilla.com','web.push.apple.com','wns.windows.com'];
+function validatePushEndpoint(endpoint:string) {
+  const url=new URL(endpoint);
+  if(url.protocol!=='https:'||url.username||url.password||url.port||!trustedPushHosts.some(host=>url.hostname===host||url.hostname.endsWith(`.${host}`)))throw new ApiError(400,'INVALID_PUSH_ENDPOINT','仅支持浏览器提供的 HTTPS 推送服务地址。');
+}
+function pushStatus(error:unknown) {return error&&typeof error==='object'?(error as {statusCode?:number}).statusCode:undefined;}
 interface EventClient {response:ServerResponse;sessionId:string;userId:string;expiresAt:number}
 
 export async function buildApp(config:Config=loadConfig()) {
@@ -32,8 +37,10 @@ export async function buildApp(config:Config=loadConfig()) {
   app.decorateRequest('auth',null);
   await app.register(cookie);
   const clients=new Set<EventClient>();
+  const unreadCount=(userId:string)=>(store.db.prepare('SELECT COALESCE(SUM(unread),0) AS n FROM accounts WHERE user_id=?').get(userId) as {n:number}).n;
   const emit=(userId:string,event:string,data:unknown)=>{
-    const frame=`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+    const payload=event==='mail'||event==='sync'?{...(data as Record<string,unknown>),unreadCount:unreadCount(userId)}:data;
+    const frame=`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
     for(const client of clients)if(client.userId===userId){if(client.response.writableLength>128*1024){client.response.end();clients.delete(client);}else client.response.write(frame);}
   };
   const closeUserEvents=(userId:string,sessionId?:string)=>{for(const client of clients)if(client.userId===userId&&(!sessionId||client.sessionId===sessionId)){client.response.end();clients.delete(client);}};
@@ -41,13 +48,15 @@ export async function buildApp(config:Config=loadConfig()) {
   async function notify(userId:string,accountId:string,count:number) {
     if(!config.vapidPublicKey||!config.vapidPrivateKey)return;
     const rows=store.db.prepare('SELECT endpoint,subscription FROM push_subscriptions WHERE user_id=?').all(userId) as {endpoint:string;subscription:string}[];
+    const payload=JSON.stringify({title:'MailNest 新邮件',body:`有 ${count} 封新邮件等待查看`,url:`/?account=${encodeURIComponent(accountId)}`,tag:`mail-${accountId}`,unreadCount:unreadCount(userId)});
     await Promise.allSettled(rows.map(async row=>{
-      try{await webPush.sendNotification(JSON.parse(row.subscription),JSON.stringify({title:'MailNest 新邮件',body:`有 ${count} 封新邮件等待查看`,url:`/?account=${encodeURIComponent(accountId)}`,tag:`mail-${accountId}`}),{TTL:300,timeout:10_000});}
-      catch(error){const code=(error as {statusCode?:number}).statusCode;if(code===404||code===410)store.db.prepare('DELETE FROM push_subscriptions WHERE endpoint=?').run(row.endpoint);}
+      try{await webPush.sendNotification(JSON.parse(row.subscription),payload,{TTL:300,timeout:10_000});}
+      catch(error){const code=pushStatus(error);if(code===404||code===410)store.db.prepare('DELETE FROM push_subscriptions WHERE endpoint=? AND user_id=? AND subscription=?').run(row.endpoint,userId,row.subscription);}
     }));
   }
   const mail=new MailService(store,config,emit,notify);
   const loginAttempts=new Map<string,{count:number;until:number}>();
+  const pushTestAttempts=new Map<string,number>();
   const cookieOptions={httpOnly:true,secure:config.appUrl.startsWith('https:'),sameSite:'lax' as const,path:'/api',maxAge:7*24*60*60};
   const prefix='/api/v1';
   function account(request:FastifyRequest,id:string):AccountRow {const row=store.account(id,request.auth!.user.id);if(!row)throw new ApiError(404,'NOT_FOUND','邮箱不存在。');return row;}
@@ -197,13 +206,12 @@ export async function buildApp(config:Config=loadConfig()) {
   app.get(`${prefix}/events`,async(request,reply)=>{
     sessionOnly(request);if([...clients].filter(c=>c.userId===request.auth!.user.id).length>=10)throw new ApiError(429,'EVENT_LIMIT','同时打开的通知连接过多。');
     reply.hijack();reply.raw.writeHead(200,{'Content-Type':'text/event-stream; charset=utf-8','Cache-Control':'no-store','Connection':'keep-alive','X-Accel-Buffering':'no','X-Content-Type-Options':'nosniff'});
-    reply.raw.write('event: ready\ndata: {}\n\n');
+    reply.raw.write(`event: ready\ndata: ${JSON.stringify({unreadCount:unreadCount(request.auth!.user.id)})}\n\n`);
     const client:EventClient={response:reply.raw,userId:request.auth!.user.id,sessionId:request.auth!.sessionId!,expiresAt:request.auth!.expiresAt!};clients.add(client);
     reply.raw.on('close',()=>clients.delete(client));
   });
   app.post(`${prefix}/push/subscriptions`,async request=>{
-    const input=pushSchema.parse(request.body);const url=new URL(input.endpoint);
-    if(url.protocol!=='https:'||url.username||url.password||url.port||( !trustedPushHosts.some(host=>url.hostname===host||url.hostname.endsWith(`.${host}`))))throw new ApiError(400,'INVALID_PUSH_ENDPOINT','仅支持浏览器提供的 HTTPS 推送服务地址。');
+    const input=pushSchema.parse(request.body);validatePushEndpoint(input.endpoint);
     if(!config.vapidPublicKey||!config.vapidPrivateKey)throw new ApiError(503,'PUSH_NOT_CONFIGURED','管理员尚未配置推送服务。');
     const userId=request.auth!.user.id;
     const existing=store.db.prepare('SELECT user_id FROM push_subscriptions WHERE endpoint=?').get(input.endpoint) as {user_id:string}|undefined;
@@ -214,6 +222,27 @@ export async function buildApp(config:Config=loadConfig()) {
     return{ok:true};
   });
   app.delete(`${prefix}/push/subscriptions`,async request=>{const input=z.object({endpoint:z.string().max(2048)}).strict().parse(request.body);store.db.prepare('DELETE FROM push_subscriptions WHERE endpoint=? AND user_id=?').run(input.endpoint,request.auth!.user.id);return{ok:true};});
+  app.post(`${prefix}/push/test`,async(request,reply)=>{
+    const input=z.object({endpoint:z.url().max(2048)}).strict().parse(request.body);validatePushEndpoint(input.endpoint);
+    const userId=request.auth!.user.id;
+    const row=store.db.prepare('SELECT subscription FROM push_subscriptions WHERE endpoint=? AND user_id=?').get(input.endpoint,userId) as {subscription:string}|undefined;
+    if(!row)throw new ApiError(404,'PUSH_SUBSCRIPTION_NOT_FOUND','当前设备尚未登记，请重新开启邮件提醒。');
+    if(!config.vapidPublicKey||!config.vapidPrivateKey)throw new ApiError(503,'PUSH_NOT_CONFIGURED','管理员尚未配置推送服务。');
+    const now=Date.now(),until=pushTestAttempts.get(userId)||0;
+    if(until>now){reply.header('Retry-After',Math.ceil((until-now)/1000));throw new ApiError(429,'PUSH_TEST_RATE_LIMIT','测试通知过于频繁，请稍后重试。');}
+    for(const [id,expires] of pushTestAttempts)if(expires<=now)pushTestAttempts.delete(id);
+    pushTestAttempts.set(userId,now+15_000);
+    try {
+      const subscription=pushSchema.parse(JSON.parse(row.subscription));
+      if(subscription.endpoint!==input.endpoint)throw new Error('Invalid stored push subscription');
+      await webPush.sendNotification(subscription,JSON.stringify({title:'MailNest 测试通知',body:'邮件提醒测试成功。',url:'/',tag:'mailnest-test',unreadCount:unreadCount(userId)}),{TTL:300,timeout:10_000});
+    }catch(error){
+      const code=pushStatus(error);
+      if(code===404||code===410){store.db.prepare('DELETE FROM push_subscriptions WHERE endpoint=? AND user_id=? AND subscription=?').run(input.endpoint,userId,row.subscription);throw new ApiError(410,'PUSH_SUBSCRIPTION_EXPIRED','当前设备的提醒订阅已过期，请重新开启邮件提醒。');}
+      throw new ApiError(503,'PUSH_DELIVERY_FAILED','推送服务暂时无法接受测试通知，请稍后重试。');
+    }
+    return{ok:true,accepted:true};
+  });
   app.get(`${prefix}/tokens`,async request=>{sessionOnly(request);return{tokens:store.db.prepare('SELECT id,name,created_at AS createdAt,last_used_at AS lastUsedAt FROM api_tokens WHERE user_id=? ORDER BY created_at DESC').all(request.auth!.user.id)};});
   app.post(`${prefix}/tokens`,async(request,reply)=>{sessionOnly(request);const input=z.object({name:z.string().trim().min(1).max(80)}).strict().parse(request.body);const count=store.db.prepare('SELECT COUNT(*) AS n FROM api_tokens WHERE user_id=?').get(request.auth!.user.id) as {n:number};if(count.n>=20)throw new ApiError(400,'TOKEN_LIMIT','最多可创建 20 个 API 令牌。');const token=`mn_${randomToken()}`,id=randomUUID();store.db.prepare('INSERT INTO api_tokens(id,user_id,name,token_hash,created_at) VALUES(?,?,?,?,?)').run(id,request.auth!.user.id,input.name,hashToken(token),new Date().toISOString());return reply.code(201).send({token,id});});
   app.delete(`${prefix}/tokens/:id`,async request=>{sessionOnly(request);store.db.prepare('DELETE FROM api_tokens WHERE id=? AND user_id=?').run((request.params as {id:string}).id,request.auth!.user.id);return{ok:true};});

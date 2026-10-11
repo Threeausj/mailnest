@@ -36,13 +36,26 @@ self.addEventListener('fetch', (event) => {
     })));
   }
 });
+async function updateAppBadge(unreadCount) {
+  if (!Number.isSafeInteger(unreadCount) || unreadCount < 0) return;
+  try {
+    if (unreadCount > 0) {
+      if (typeof self.navigator?.setAppBadge === 'function') await self.navigator.setAppBadge(unreadCount);
+    } else if (typeof self.navigator?.clearAppBadge === 'function') await self.navigator.clearAppBadge();
+    else if (typeof self.navigator?.setAppBadge === 'function') await self.navigator.setAppBadge(0);
+  } catch { /* App badges are optional and may require notification permission. */ }
+}
 self.addEventListener('push', (event) => {
   let payload = { title: '邮屿 · 新邮件', body: '你有新的邮件，打开邮屿查看。', url: '/' };
   try { Object.assign(payload, event.data?.json()); } catch { /* Use generic text. */ }
-  event.waitUntil(self.registration.showNotification(payload.title, {
-    body: payload.body, icon: '/icon-192.png', badge: '/icon-192.png', tag: 'mailnest-new-mail',
+  const notification = self.registration.showNotification(payload.title, {
+    body: payload.body, icon: '/icon-192.png', badge: '/icon-192.png',
+    tag: payload.tag === 'mailnest-test' ? 'mailnest-test' : 'mailnest-new-mail',
     data: { url: '/' },
-  }));
+  });
+  // NotificationOptions.badge is only an icon mask; the OS app's numerical
+  // unread badge uses WorkerNavigator's Badging API independently.
+  event.waitUntil(Promise.all([notification,updateAppBadge(payload.unreadCount)]));
 });
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
