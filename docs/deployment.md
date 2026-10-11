@@ -22,7 +22,7 @@ curl http://localhost:3001/api/v1/health
 
 ## 当前 NAS 的 Docker 部署
 
-当前 NAS 部署目录为 `/volume2/docker/mailnest`，访问地址为 `http://192.168.91.85:5173`。GitHub 私有仓库仅保存源码；`.env`、`data/`、`backups/`、本机覆盖文件和私钥均排除在 Git 与镜像构建之外。现有 `/volume2/workspace/mailnest` 可继续用于开发。
+当前 NAS 部署目录为 `/volume2/docker/mailnest`，访问地址为 `http://192.168.91.85:5173`。[GitHub 私有仓库 Threeausj/mailnest](https://github.com/Threeausj/mailnest) 仅保存源码；`.env`、`data/`、`backups/`、本机覆盖文件和私钥均排除在 Git 与镜像构建之外。现有 `/volume2/workspace/mailnest` 可继续用于开发。
 
 部署目录的 `compose.override.yml` 由 `deploy/compose.nas.yml` 复制而来，与基础 `compose.yml` 自动合并。该模板使用宿主网络和 `127.0.0.1` DNS，沿用 NAS 的 mihomo 代理 / Fake-IP；数据绑定至部署目录的 `data/`。Docker Compose 需要支持 `!reset` / `!override`（2.24.4+）。容器以 UID 1000 运行，只读根文件系统，数据目录可写，自动重启并检查 5173 端口健康状态。
 
