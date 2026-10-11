@@ -1496,6 +1496,7 @@ test('HTML mail preserves styled cards, responsive typography, buttons, table la
 });
 
 test('foreground application badges follow the total unread count across mailboxes, clear at zero and logout, and tolerate browser rejection', async ({ page }) => {
+  if (test.info().project.name === 'tablet') await page.setViewportSize({width:1097,height:600});
   await page.addInitScript(() => {
     const state = {calls:[] as {type:string,count?:number}[],current:0,reject:false};
     (window as any).__badgeFixture = state;
@@ -1534,10 +1535,28 @@ test('foreground application badges follow the total unread count across mailbox
   const browserErrors: string[] = [];
   page.on('pageerror',error => browserErrors.push(error.message));
   const badge = () => page.evaluate(() => ({...(window as any).__badgeFixture}));
+  const expectVisibleBadge = async (count: string) => {
+    const bell = page.locator('.notification-settings');
+    const moreBadge = page.locator('.mail-more-button>.notification-count');
+    if (await bell.isVisible()) {
+      await expect(bell.locator('.notification-count')).toBeVisible();
+      await expect(bell.locator('.notification-count')).toHaveText(count);
+      await expect(moreBadge).toBeHidden();
+    } else {
+      await expect(moreBadge).toBeVisible();
+      await expect(moreBadge).toHaveText(count);
+      await page.getByRole('button',{name:'更多邮件操作',exact:true}).click();
+      const reminder = page.getByRole('menuitem',{name:'邮件提醒设置',exact:true});
+      await expect(reminder.locator('.notification-count')).toBeVisible();
+      await expect(reminder.locator('.notification-count')).toHaveText(count);
+      await page.keyboard.press('Escape');
+    }
+  };
   await page.goto('/');
   await expect.poll(async () => (await badge()).current).toBe(7);
   await expect.poll(() => page.title()).toMatch(/^\(7\) /);
   await expect(page.locator('.notification-settings .notification-count')).toHaveText('7');
+  await expectVisibleBadge('7');
   if (test.info().project.name === 'mobile') await expect(page.locator('.mobile-bottom-nav .notification-count')).toHaveText('7');
   const nav = page.getByRole('button',{name:'打开导航菜单',exact:true});
   if (await nav.isVisible()) await nav.click();
@@ -1553,6 +1572,7 @@ test('foreground application badges follow the total unread count across mailbox
   await page.evaluate(() => (window as any).__emitMailboxEvent('ready',{unreadCount:6}));
   await expect.poll(async () => (await badge()).current).toBe(6);
   await expect(page.locator('.notification-settings .notification-count')).toHaveText('6');
+  await expectVisibleBadge('6');
   releaseAccounts();
   // The sidebar confirms that the stale response was committed, while the newer SSE total still wins.
   await expect(page.locator('.unified-folder-group .mailbox-folder').first().locator('b')).toHaveText('5');

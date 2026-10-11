@@ -314,7 +314,7 @@ export default function App() {
             onMove={(destination) => void move(destination)}
             onUnread={() => message && void updateMessage(message, { unread: !message.unread })}
             onStar={() => message && void updateMessage(message, { starred: !message.starred })}
-            onSettings={() => setSettings(true)} install={pwaInstall} />
+            onSettings={() => setSettings(true)} install={pwaInstall} unreadCount={badgeUnread} />
           <div className="header-actions">
             <label className="search-box"><Search size={16} /><input aria-label="搜索邮件" placeholder="搜索邮件…" value={query} onChange={(e) => setQuery(e.target.value)} />{query && <button className="icon-button" aria-label="清除搜索" onClick={() => setQuery('')}><X size={14} /></button>}</label>
             <PwaInstallButton install={pwaInstall} className="icon-button header-install" iconOnly />

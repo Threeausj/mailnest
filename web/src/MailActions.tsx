@@ -17,10 +17,11 @@ export interface MailActionsProps {
   onStar: () => void;
   onSettings: () => void;
   install: PwaInstallController;
+  unreadCount?: number;
 }
 
 export default function MailActions({ message, selected, folder, busy, onBack, onReply, onForward,
-  onMove, onUnread, onStar, onSettings, install }: MailActionsProps) {
+  onMove, onUnread, onStar, onSettings, install, unreadCount = 0 }: MailActionsProps) {
   const [menuOpen, setMenuOpen] = useState<'mark' | 'more' | null>(null);
   const markWrap = useRef<HTMLDivElement>(null);
   const markButton = useRef<HTMLButtonElement>(null);
@@ -32,6 +33,7 @@ export default function MailActions({ message, selected, folder, busy, onBack, o
   const unavailable = !selected || !message || busy;
   const unreadLabel = message?.unread ? '标记为已读' : '标记为未读';
   const starLabel = message?.starred ? '取消星标' : '标记星标';
+  const unreadBadge = Number.isSafeInteger(unreadCount) && unreadCount > 0 ? unreadCount > 99 ? '99+' : String(unreadCount) : null;
 
   function visibleItems() {
     return Array.from(menu.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') || [])
@@ -142,7 +144,7 @@ export default function MailActions({ message, selected, folder, busy, onBack, o
           initialFocus.current = 'first';
           setMenuOpen((open) => open === 'more' ? null : 'more');
         }}
-        onKeyDown={(event) => openMenu('more', event)}><MoreHorizontal size={18} /></button>
+        onKeyDown={(event) => openMenu('more', event)}><MoreHorizontal size={18} />{unreadBadge && <span className="notification-count" aria-hidden="true">{unreadBadge}</span>}</button>
       {menuOpen === 'more' && <div className="mail-actions-menu" id={menuId} ref={menu} role="menu"
         aria-label="更多邮件操作" onKeyDown={navigateMenu}>
         <button type="button" role="menuitem" tabIndex={-1} aria-label="归档邮件"
@@ -156,7 +158,7 @@ export default function MailActions({ message, selected, folder, busy, onBack, o
           <PwaInstallButton install={install} className="toolbar-install-menu-item" role="menuitem" tabIndex={-1} />
         </div>
         <button type="button" role="menuitem" tabIndex={-1} className="toolbar-utility-settings"
-          aria-label="邮件提醒设置" onClick={() => select(onSettings)}><Bell size={16} /><span>邮件提醒设置</span></button>
+          aria-label="邮件提醒设置" onClick={() => select(onSettings)}><Bell size={16} /><span>邮件提醒设置</span>{unreadBadge && <span className="notification-count" aria-hidden="true">{unreadBadge}</span>}</button>
       </div>}
     </div>
   </div>;

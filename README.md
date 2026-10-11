@@ -80,7 +80,7 @@ Android / 桌面可使用浏览器安装菜单；iPhone / iPad 可在 Safari 的
 
 在“设置 → 应用与提醒”开启本设备后台提醒后，可点击“发送测试通知”，走与新邮件相同的服务器 Web Push 投递链路。成功提示表示推送服务已接受请求，请同时检查设备系统通知；仅测试当前设备，每 15 秒最多一次，过期订阅需重新开启。测试不会增加未读邮件数。
 
-应用内提醒铃铛和手机收件箱显示总未读数字红点（超过 99 显示 99+），页面标题显示总未读数；与当前筛选、搜索或账号无关，数据口径为所有账号远端收件箱的未读数之和。支持 Badging API 的已安装应用同步系统图标数字，后台推送也携带真实总未读数；清零与退出登录清除角标。iOS / iPadOS 16.4+ 主屏幕应用的角标受通知权限控制，Android 桌面红点或数字由系统通知 / 启动器支持决定。[WebKit 角标说明](https://webkit.org/blog/14112/badging-for-home-screen-web-apps/)、[Chrome 平台说明](https://developer.chrome.com/docs/capabilities/web-apis/badging-api)
+应用内提醒铃铛和手机收件箱显示总未读数字红点；较窄阅读区的铃铛收起时，“更多”按钮及提醒菜单保留数字（超过 99 显示 99+），页面标题显示总未读数；与当前筛选、搜索或账号无关，数据口径为所有账号远端收件箱的未读数之和。支持 Badging API 的已安装应用同步系统图标数字，后台推送也携带真实总未读数；清零与退出登录清除角标。iOS / iPadOS 16.4+ 主屏幕应用的角标受通知权限控制，Android 桌面红点或数字由系统通知 / 启动器支持决定。[WebKit 角标说明](https://webkit.org/blog/14112/badging-for-home-screen-web-apps/)、[Chrome 平台说明](https://developer.chrome.com/docs/capabilities/web-apis/badging-api)
 
 ## API 与维护
 
