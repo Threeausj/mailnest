@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowDownToLine, Paperclip } from 'lucide-react';
 import { ApiError, errorText } from './api';
 import { fileSize, Spinner } from './components';
+import { useTheme } from './Theme';
 import type { Message } from './types';
 import { contentId, imageType, mailDocument, maxBodyHeight, prepareMail } from './mailRenderer';
 
@@ -27,13 +28,25 @@ function imageDataUrl(blob: Blob, signal: AbortSignal): Promise<string> {
 }
 
 export default function MailBody({ message }: { message: Message }) {
+  const { theme } = useTheme();
+  const currentTheme = useRef(theme); currentTheme.current = theme;
   const [retry, setRetry] = useState(0);
   const [bodySize, setBodySize] = useState({ height: 100, capped: false });
   const [inline, setInline] = useState<{ sources: Record<string, string>; failed: string[]; loading: boolean; error: string }>({ sources: {}, failed: [], loading: false, error: '' });
   const frame = useRef<HTMLIFrameElement>(null);
   const security = useMemo(() => ({ nonce: randomToken(), token: randomToken() }), [message.id]);
   const prepared = useMemo(() => prepareMail(message.html || '', message.attachments), [message.html, message.attachments]);
-  const document = useMemo(() => mailDocument(prepared, inline.sources, security.nonce, security.token), [prepared, inline.sources, security]);
+  // Theme changes reach the existing document by message; keep its DOM and
+  // already loaded images intact instead of replacing srcDoc.
+  const document = useMemo(() => mailDocument(prepared, inline.sources, security.nonce, security.token, currentTheme.current), [prepared, inline.sources, security]);
+  const synchronizeTheme = () => {
+    const colors = getComputedStyle(window.document.documentElement);
+    frame.current?.contentWindow?.postMessage({
+      type: 'mailnest:theme', token: security.token, theme: currentTheme.current,
+      foreground: colors.getPropertyValue('--ink').trim(), background: colors.getPropertyValue('--paper').trim(),
+    }, '*');
+  };
+  useEffect(() => { synchronizeTheme(); }, [theme, security.token]);
   useEffect(() => {
     const onSize = (event: MessageEvent) => {
       if (event.source !== frame.current?.contentWindow) return;
@@ -94,7 +107,7 @@ export default function MailBody({ message }: { message: Message }) {
     {inline.loading && <div className="inline-images-status"><Spinner label="正在加载内嵌图片…" /></div>}
     {inline.failed.length > 0 && <div className="inline-images-status" role="status"><span>{inline.error ? `部分内嵌图片加载失败：${inline.error}` : '部分内嵌图片较大，可从下方附件下载查看。'}</span>{inline.error && <button className="text-button" onClick={() => setRetry((value) => value + 1)}>重试图片</button>}</div>}
     {message.bodyTruncated && <p className="body-truncated-notice">正文较长，已截取显示。</p>}
-    <div className="message-body">{message.html ? <><iframe ref={frame} title="邮件正文" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" referrerPolicy="no-referrer" srcDoc={document} scrolling={bodySize.capped ? 'yes' : 'no'} style={{ height: bodySize.height }} onLoad={() => frame.current?.contentWindow?.postMessage({ type: 'mailnest:measure-request', token: security.token }, '*')} />{bodySize.capped && <p className="body-truncated-notice">正文超长，可在正文区域内继续滚动阅读。</p>}</> : <pre>{message.text || '（这封邮件没有正文）'}</pre>}</div>
+    <div className="message-body">{message.html ? <><iframe ref={frame} title="邮件正文" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" referrerPolicy="no-referrer" srcDoc={document} scrolling={bodySize.capped ? 'yes' : 'no'} style={{ height: bodySize.height }} onLoad={() => { synchronizeTheme(); frame.current?.contentWindow?.postMessage({ type: 'mailnest:measure-request', token: security.token }, '*'); }} />{bodySize.capped && <p className="body-truncated-notice">正文超长，可在正文区域内继续滚动阅读。</p>}</> : <pre>{message.text || '（这封邮件没有正文）'}</pre>}</div>
     {attachments.length > 0 && <section className="message-attachments" aria-label="邮件附件"><h3><Paperclip size={16} /> {attachments.length} 个附件</h3><div>{attachments.map((attachment) => <a className="attachment-download" key={attachment.id} href={`/api/v1/messages/${encodeURIComponent(message.id)}/attachments/${encodeURIComponent(attachment.id)}`} download={attachment.filename}><Paperclip size={18} /><span>{attachment.filename}<small>{fileSize(attachment.size)}</small></span><ArrowDownToLine size={16} /></a>)}</div></section>}
   </>;
 }

@@ -1,6 +1,6 @@
 const CACHE = '__MAILNEST_CACHE_VERSION__';
 const BUILT_ASSETS = /* __MAILNEST_PRECACHE_ASSETS__ */ [];
-const STATIC = ['/', '/icon-blue-v2.svg', '/icon-blue-192-v2.png', '/icon-blue-512-v2.png', '/icon-blue-maskable-512-v2.png', '/notification-badge-v2.png', '/manifest.webmanifest', ...BUILT_ASSETS];
+const STATIC = ['/', '/theme-init-v1.js', '/icon-blue-v2.svg', '/icon-blue-192-v2.png', '/icon-blue-512-v2.png', '/icon-blue-maskable-512-v2.png', '/notification-badge-v2.png', '/manifest.webmanifest', ...BUILT_ASSETS];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(STATIC)));
