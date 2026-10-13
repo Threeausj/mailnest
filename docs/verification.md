@@ -278,3 +278,10 @@ HTML 作者配色经过净化 DOM / CSSOM 检测，含嵌套 media / supports �
 真实 TLS GreenMail 两项通过：新协议用例在最新 20 封窗口外发现 Flagged，按两个账号合并预热最新 3 和所有星标，BODY.PEEK 不改变 Seen，不产生旧信提醒；随后模拟远端不可用，全部目标经鉴权正文接口成功且 IMAP 连接次数为 0。原收发 / MIME / 附件 / 标记 / 移动 / 编辑配置流程继续通过。所有主动验证均使用沙箱邮件、受控 API 或模拟推送。
 
 最终本地桌面 / 平板 / 手机完整浏览器回归 165 项通过（3.4 分钟），包括 HTML 沙箱 / 排版、连续加载、返回和分栏、主题 / 草稿、通知与多端元数据，以及新增阅读速度用例。
+
+
+运行代码 `5bb5d00` 已推送私有仓库，[GitHub Actions 完整检查](https://github.com/Threeausj/mailnest/actions/runs/38368550723) 成功；部署到 `/volume2/docker/mailnest` 的镜像为 `sha256:19cab76a51058045b6860f57dcbf66bcdedf9f53aa75f52071fd3c3235936b85`，前端资源 `index-BQ6CJBGN.js` / `index-DHcAKl58.css`。升级前一致 SQLite 与配置备份位于 `/volume2/docker/mailnest/backups/mail-cache-20261013-155831`，回滚镜像 `mailnest:before-mail-cache-20261013-155831`。
+
+部署前在禁网、关闭后台且模拟全部 Push 的临时容器中，用正式数据副本验证原 5 个凭据、来源 / 鉴权、设备推送与 UUID 去重、排序和数据保留，以及迁移后的三路缓存正文 API 并行读取全部 200、零 IMAP 连接；应用内合计约 1.29 ms，仅为本地隔离预检，不代表手机网络耗时。正式容器 healthy，继续使用 node 用户、只读根目录和 host 网络。本地及 HTTPS 首页 / 健康 / manifest / Worker / 主题启动脚本均 200，未登录账号读取 401；业务响应 no-store，Worker no-cache。原 5 账号、37 目录、7 会话和 3 推送订阅保留，数据库完整性 ok；原有一账号短暂连接超时在上线后正常同步恢复。后台已补齐 101 个目标（合并最新 100 + 范围外星标 1），正文总占用约 3.34 MiB；正常新信到达会调整目标并继续补齐。
+
+公网正式资源的三端合成阅读速度回归 9 / 9 通过，业务 API 全部模拟、不发送真实邮件或通知。首次直连公网测试遇到 Chromium `ERR_NETWORK_CHANGED`，包含后续静态 JS 请求中断；沿用 NAS 现有 HTTP 代理完成全部用例，不修改产品或代理设置，也不放宽功能断言。
