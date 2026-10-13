@@ -137,7 +137,7 @@ test('identity changes isolate cached UIDs and reject queued old-message operati
   release();const result=await update;await rejection;
   assert.equal(result.cacheReset,true);assert.equal(result.account.id,account.id);assert.equal(result.account.unread,0);assert.equal(result.account.last_synced_at,null);assert.ok(result.account.mail_cache_epoch);
   assert.equal(project.store.message(row.id,userId),undefined);assert.deepEqual(project.mail.cachedFolders(account.id),[]);assert.equal(project.store.db.prepare('SELECT COUNT(*) AS n FROM attachments').get()!.n,0);assert.equal(mock.calls.length,2,'queued old-message operation must not open IMAP against the new mailbox');
-  const client={usable:true,mailbox:{exists:1,uidValidity:1n,uidNext:2},list:async()=>[{path:'INBOX',name:'INBOX',flags:new Set()}],getMailboxLock:async()=>({release(){}}),fetchAll:async()=>[{uid:1,seq:1,envelope:{subject:'New synthetic mailbox',date:'2026-01-02'},flags:new Set(['\\Seen'])}],status:async()=>({unseen:0})};
+  const client={usable:true,mailbox:{exists:1,uidValidity:1n,uidNext:2},list:async()=>[{path:'INBOX',name:'INBOX',flags:new Set()}],getMailboxLock:async()=>({release(){}}),search:async()=>[],fetchAll:async()=>[{uid:1,seq:1,envelope:{subject:'New synthetic mailbox',date:'2026-01-02'},flags:new Set(['\\Seen'])}],status:async()=>({unseen:0})};
   (project.mail as unknown as MailHooks).withClient=async(_account,_credentials,work)=>work(client as unknown as ImapFlow);
   // Re-enable only the synthetic sync; no real mail server is contacted.
   Object.getPrototypeOf(project.mail).schedule.call(project.mail,account.id);await project.mail.waitForSync();

@@ -15,7 +15,9 @@ export interface AccountRow {
 export interface MessageRow {
   id:string; account_id:string; folder:string; uid:number; uid_validity:string; summary:string;
   source:Uint8Array|null; detail:string|null; detail_cached_at?:number|null; unread:number; starred:number; date:string;
+  cache_priority?:number; detail_size_bytes?:number; detail_retry_at?:number;
 }
+export interface MailCacheTarget extends MessageRow {user_id:string;cache_priority:number;detail_size_bytes:number;detail_retry_at:number;has_detail:number}
 export type FolderKind = 'inbox'|'sent'|'drafts'|'junk'|'trash'|'archive'|'important'|'custom';
 export interface FolderDto { path:string; name:string; specialUse:string|null; selectable:boolean; kind:FolderKind }
 export class Store {
@@ -44,6 +46,8 @@ export class Store {
     `);
     const columns=this.db.prepare('PRAGMA table_info(messages)').all() as {name:string}[];
     if(!columns.some(column=>column.name==='detail_cached_at'))this.db.exec('ALTER TABLE messages ADD COLUMN detail_cached_at INTEGER');
+    for(const column of ['cache_priority','detail_size_bytes','detail_retry_at'])if(!columns.some(existing=>existing.name===column))this.db.exec(`ALTER TABLE messages ADD COLUMN ${column} INTEGER NOT NULL DEFAULT 0`);
+    this.db.exec('CREATE INDEX IF NOT EXISTS messages_cache_targets ON messages(cache_priority DESC,date DESC,id); UPDATE messages SET detail_size_bytes=length(CAST(detail AS BLOB)) WHERE detail IS NOT NULL AND detail_size_bytes=0');
     const folderColumns=this.db.prepare('PRAGMA table_info(folders)').all() as {name:string}[];
     if(!folderColumns.some(column=>column.name==='selectable'))this.db.exec('ALTER TABLE folders ADD COLUMN selectable INTEGER NOT NULL DEFAULT 1');
     const accountColumns=this.db.prepare('PRAGMA table_info(accounts)').all() as {name:string}[];
@@ -51,7 +55,7 @@ export class Store {
     if(!accountColumns.some(column=>column.name==='sort_order'))this.db.exec('ALTER TABLE accounts ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0');
     // Old versions stored both complete MIME messages and decoded attachment bytes.
     // The remote mailbox remains the source of truth; keep only bounded body caches.
-    this.db.exec("UPDATE messages SET source=NULL WHERE source IS NOT NULL; DELETE FROM attachments; UPDATE messages SET detail=NULL,detail_cached_at=NULL WHERE detail IS NOT NULL AND (json_extract(detail,'$.cacheVersion') IS NOT 2)");
+    this.db.exec("UPDATE messages SET source=NULL WHERE source IS NOT NULL; DELETE FROM attachments; UPDATE messages SET detail=NULL,detail_cached_at=NULL,detail_size_bytes=0,detail_retry_at=0 WHERE detail IS NOT NULL AND (json_extract(detail,'$.cacheVersion') IS NOT 2)");
   }
   async bootstrap(config: Config) {
     const count = this.db.prepare('SELECT COUNT(*) AS n FROM users').get() as {n:number};
@@ -63,11 +67,36 @@ export class Store {
     this.db.prepare('DELETE FROM oauth_states WHERE expires_at < ?').run(Date.now());
     this.pruneMailCache();
   }
-  pruneMailCache() {
-    this.db.prepare('UPDATE messages SET detail=NULL,detail_cached_at=NULL WHERE detail IS NOT NULL AND (detail_cached_at IS NULL OR detail_cached_at<?)').run(Date.now()-this.config.mailCacheTtlDays*86400_000);
-    const rows=this.db.prepare('SELECT id,length(CAST(detail AS BLOB)) AS size FROM messages WHERE detail IS NOT NULL ORDER BY detail_cached_at ASC,id').all() as {id:string;size:number}[];
-    let bytes=rows.reduce((sum,row)=>sum+row.size,0);
-    for(const row of rows){if(bytes<=this.config.mailCacheMaxBytes)break;this.db.prepare('UPDATE messages SET detail=NULL,detail_cached_at=NULL WHERE id=?').run(row.id);bytes-=row.size;}
+  pruneMailCache(refreshTargets=true) {
+    if(refreshTargets)this.refreshMailCacheTargets();
+    const now=Date.now();
+    this.db.exec('UPDATE messages SET detail_size_bytes=length(CAST(detail AS BLOB)) WHERE detail IS NOT NULL AND detail_size_bytes=0');
+    this.db.prepare('UPDATE messages SET detail=NULL,detail_cached_at=NULL WHERE cache_priority=0 AND detail IS NOT NULL AND (detail_cached_at IS NULL OR detail_cached_at<?)').run(now-this.config.mailCacheTtlDays*86400_000);
+    const rows=this.db.prepare('SELECT id,cache_priority,detail_size_bytes AS size FROM messages WHERE detail IS NOT NULL ORDER BY cache_priority DESC,CASE WHEN cache_priority>0 THEN date END DESC,CASE WHEN cache_priority=0 THEN detail_cached_at END DESC,id').all() as {id:string;cache_priority:number;size:number}[];
+    let retained=0;
+    const evict=this.db.prepare('UPDATE messages SET detail=NULL,detail_cached_at=NULL,detail_size_bytes=?,detail_retry_at=MAX(detail_retry_at,?) WHERE id=?');
+    for(const row of rows){if(retained+row.size<=this.config.mailCacheMaxBytes){retained+=row.size;continue;}evict.run(row.size,row.cache_priority?now+3600_000:0,row.id);}
+  }
+  refreshMailCacheTargets() {
+    // Rank across all mailboxes/folders of each owner, matching list ordering.
+    this.db.prepare(`WITH ranked AS (SELECT m.id,ROW_NUMBER() OVER(PARTITION BY a.user_id ORDER BY m.date DESC,m.id) AS position FROM messages m JOIN accounts a ON a.id=m.account_id), priorities AS (SELECT m.id,CASE WHEN m.starred=1 THEN 2 WHEN r.position<=? THEN 1 ELSE 0 END AS priority FROM messages m JOIN ranked r ON r.id=m.id) UPDATE messages SET cache_priority=(SELECT priority FROM priorities WHERE priorities.id=messages.id) WHERE cache_priority<>(SELECT priority FROM priorities WHERE priorities.id=messages.id)`).run(this.config.mailCacheRecentCount);
+  }
+  mailCacheTargets():MailCacheTarget[] {
+    // Do not materialize up to the entire body budget just to plan background work.
+    return this.db.prepare('SELECT m.id,m.account_id,m.folder,m.uid,m.uid_validity,m.summary,m.unread,m.starred,m.date,m.detail_cached_at,m.cache_priority,m.detail_size_bytes,m.detail_retry_at,m.detail IS NOT NULL AS has_detail,NULL AS detail,NULL AS source,a.user_id FROM messages m JOIN accounts a ON a.id=m.account_id WHERE m.cache_priority>0 ORDER BY m.cache_priority DESC,m.date DESC,m.id').all() as unknown as MailCacheTarget[];
+  }
+  canWarmMail(row:MessageRow) {
+    return this.admittedMailCacheTargets().some(target=>target.id===row.id);
+  }
+  admittedMailCacheTargets():MailCacheTarget[] {
+    // Previously measured sizes keep admission stable after a body is evicted.
+    // Unmeasured bodies reserve a small allowance until their exact size is known.
+    let retained=0;const admitted:MailCacheTarget[]=[];
+    for(const target of this.mailCacheTargets()){
+      const size=target.detail_size_bytes||64*1024;
+      if(retained+size<=this.config.mailCacheMaxBytes){retained+=size;admitted.push(target);}
+    }
+    return admitted;
   }
   user(id:string) { return this.db.prepare('SELECT * FROM users WHERE id=?').get(id) as UserRow|undefined; }
   account(id:string,userId?:string) {

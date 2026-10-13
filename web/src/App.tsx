@@ -237,16 +237,17 @@ export default function App() {
   useEffect(() => {
     if (!user || !selectedId) { setMessage(null); return; }
     const controller = new AbortController(); latestDetailSummary.current = null; setDetailLoading(true); setDetailError(''); setMessage(null);
-    api<{ message: Message }>(`/messages/${encodeURIComponent(selectedId)}`, { signal: controller.signal }).then(async ({ message: value }) => {
-      if (controller.signal.aborted) return;
+    api<{ message: Message }>(`/messages/${encodeURIComponent(selectedId)}`, { signal: controller.signal }).then(({ message: value }) => {
+      if (controller.signal.aborted || currentMessage.current !== selectedId) return;
       const latest = latestDetailSummary.current;
       const displayed = latest?.id === value.id ? { ...value, ...latest } : value;
-      setMessage(displayed);
+      setMessage(displayed); setDetailLoading(false);
       if (displayed.unread) {
-        try {
-          const updated = await patch<{ message: MessageSummary }>(`/messages/${encodeURIComponent(selectedId)}`, { unread: false });
-          if (!controller.signal.aborted) { setMessage((current) => current?.id === updated.message.id ? { ...current, ...updated.message } : current); setMessages((previous) => previous.map((item) => item.id === updated.message.id ? updated.message : item)); refresh(); }
-        } catch (error) { if (!controller.signal.aborted) setToast(`邮件已打开，但标记已读失败：${errorText(error)}`); }
+        // Display the body before the remote flag operation, which can wait for
+        // an IMAP connection or another operation on this mailbox.
+        void patch<{ message: MessageSummary }>(`/messages/${encodeURIComponent(selectedId)}`, { unread: false }).then(updated => {
+          if (!controller.signal.aborted && currentMessage.current === selectedId) { setMessage((current) => current?.id === updated.message.id ? { ...current, ...updated.message } : current); setMessages((previous) => previous.map((item) => item.id === updated.message.id ? updated.message : item)); refresh(); }
+        }).catch(error => { if (!controller.signal.aborted && currentMessage.current === selectedId) setToast(`邮件已打开，但标记已读失败：${errorText(error)}`); });
       }
     }).catch((error) => { if (error.name !== 'AbortError') setDetailError(errorText(error)); }).finally(() => { if (!controller.signal.aborted) setDetailLoading(false); });
     return () => controller.abort();

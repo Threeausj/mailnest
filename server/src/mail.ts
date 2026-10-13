@@ -13,6 +13,8 @@ const MAX_BODY_BYTES = 2 * 1024 * 1024;
 const MAX_TEXT_BYTES = 512 * 1024;
 const MAX_NOTIFICATION_BODY_BYTES = 16 * 1024;
 const NOTIFICATION_PREVIEW_TIMEOUT = 8_000;
+const WARM_MESSAGE_TIMEOUT = 10_000;
+const WARM_RETRY_DELAY = 3600_000;
 export const INLINE_IMAGE_TYPES = new Set(['image/png','image/jpeg','image/gif','image/webp','image/avif','image/bmp']);
 interface CachedAttachment {id:string;filename:string;contentType:string;size:number;contentId:string|null;inline:boolean;part?:string;sourceIndex?:number;transferEncoding?:string}
 interface CachedDetail {cacheVersion:2;text:string;html:string|null;messageId:string|null;attachments:CachedAttachment[];bodyTruncated:boolean}
@@ -109,6 +111,12 @@ export class MailService {
   private stopped = false;
   private syncRunning=0;
   private syncWaiters:(()=>void)[]=[];
+  private warming?:Promise<void>;
+  private warmRequested=false;
+  private warmPause?:{timer:ReturnType<typeof setTimeout>;resolve:()=>void};
+  private bodyStreams=new Map<ImapFlow,Set<Readable>>();
+  private activeWarmOperation?:{accountId:string;cancel:()=>void};
+  private interruptedWarmClients=new WeakSet<ImapFlow>();
   constructor(private store:Store,private config:Config,private emit:Emit,private notify:(userId:string,accountId:string,count:number,notificationId?:string,details?:MailNotificationDetails)=>Promise<void>,private stageNotification?:(userId:string,accountId:string,count:number,notificationId:string,details?:MailNotificationDetails)=>void) { this.box=new SecretBox(config.encryptionKey); }
   private currentAccount(account:AccountRow):AccountRow {
     const current=this.store.account(account.id,account.user_id);
@@ -122,7 +130,8 @@ export class MailService {
     const credentials=this.box.decrypt<Credentials>(account.credentials);
     return{authType:credentials.oauth?'oauth':'password',hasSeparateSmtpCredentials:this.separateSmtp(account,credentials)};
   }
-  private async serial<T>(id:string,operation:()=>Promise<T>):Promise<T> {
+  private async serial<T>(id:string,operation:()=>Promise<T>,background=false):Promise<T> {
+    if(!background&&this.activeWarmOperation?.accountId===id)this.activeWarmOperation.cancel();
     const prior=this.queues.get(id)||Promise.resolve();
     const next=prior.catch(()=>{}).then(()=>{if(this.stopped)throw new ApiError(503,'SHUTDOWN','服务正在关闭。');return operation();});
     this.queues.set(id,next);
@@ -143,9 +152,18 @@ export class MailService {
     client.on('error',()=>{});
     this.activeClients.add(client);
     let timeout:ReturnType<typeof setTimeout>;
-    const expired=new Promise<never>((_,reject)=>{timeout=setTimeout(()=>{this.timedOutClients.add(client);client.close();reject(new ApiError(504,'MAIL_TIMEOUT','邮箱操作超时，请稍后重试。'));},90_000);timeout.unref();});
+    const expired=new Promise<never>((_,reject)=>{timeout=setTimeout(()=>{this.cancelClient(client);reject(new ApiError(504,'MAIL_TIMEOUT','邮箱操作超时，请稍后重试。'));},90_000);timeout.unref();});
     try{return await Promise.race([(async()=>{await client.connect();return work(client);})(),expired]);}
-    finally{clearTimeout(timeout!);client.close();this.activeClients.delete(client);}
+    finally{clearTimeout(timeout!);for(const stream of this.bodyStreams.get(client)||[])stream.destroy();client.close();this.activeClients.delete(client);}
+  }
+  private cancelClient(client:ImapFlow) {
+    this.timedOutClients.add(client);
+    for(const stream of this.bodyStreams.get(client)||[])stream.destroy();
+    try{client.close();}catch{}
+  }
+  private assertReadable(client:ImapFlow) {
+    if(this.stopped)throw new ApiError(503,'SHUTDOWN','服务正在关闭。');
+    if(this.timedOutClients.has(client))throw new ApiError(504,'MAIL_TIMEOUT','邮箱操作超时，请稍后重试。');
   }
   private async smtp(account:AccountRow,credentials:Credentials) {
     const address=await resolveMailHost(account.smtp_host,this.config.allowPrivateMailHosts);
@@ -255,11 +273,78 @@ export class MailService {
   }
   schedule(accountId:string):void {
     if(this.stopped||this.scheduled.has(accountId))return;
-    const promise=this.acquireSync().then(()=>this.sync(accountId)).catch(()=>{}).finally(()=>{this.syncRunning--;this.syncWaiters.shift()?.();this.scheduled.delete(accountId);});
+    const promise=this.acquireSync().then(()=>this.sync(accountId)).catch(()=>{}).finally(()=>{this.syncRunning--;this.syncWaiters.shift()?.();this.scheduled.delete(accountId);if(!this.stopped){this.store.pruneMailCache();this.scheduleWarm();}});
     this.scheduled.set(accountId,promise);
   }
   private async acquireSync() {if(this.syncRunning>=2)await new Promise<void>(resolve=>this.syncWaiters.push(resolve));this.syncRunning++;}
   async waitForSync() {await Promise.all(this.scheduled.values());}
+  /** Explicit force is useful for controlled protocol tests; ordinary triggers honor background=false. */
+  scheduleWarm(force=false):void {
+    if(this.stopped||!force&&!this.config.background)return;
+    this.warmRequested=true;
+    if(this.warming)return;
+    this.warming=Promise.resolve().then(()=>this.warmCache()).catch(()=>{}).finally(()=>{this.warming=undefined;if(this.warmRequested&&!this.stopped)this.scheduleWarm(force);});
+  }
+  async waitForWarm() {while(this.warming)await this.warming;}
+  private async yieldWarm() {
+    await new Promise<void>(resolve=>{const timer=setTimeout(()=>{this.warmPause=undefined;resolve();},50);this.warmPause={timer,resolve};});
+  }
+  private async boundedWarm<T>(accountId:string,client:ImapFlow,work:()=>Promise<T>):Promise<T> {
+    let timer:ReturnType<typeof setTimeout>|undefined;
+    const interrupted=new Promise<never>((_,reject)=>{this.activeWarmOperation={accountId,cancel:()=>{this.interruptedWarmClients.add(client);this.cancelClient(client);reject(new ApiError(409,'WARM_INTERRUPTED','前台操作优先。'));}};});
+    try{return await Promise.race([work(),interrupted,new Promise<never>((_,reject)=>{timer=setTimeout(()=>{this.cancelClient(client);reject(new ApiError(504,'MAIL_TIMEOUT','正文预热超时。'));},WARM_MESSAGE_TIMEOUT);timer.unref();})]);}
+    finally{if(timer)clearTimeout(timer);this.activeWarmOperation=undefined;}
+  }
+  private async warmCache() {
+    while(!this.stopped) {
+      const refreshTargets=this.warmRequested;
+      this.warmRequested=false;
+      this.store.pruneMailCache(refreshTargets);
+      const now=Date.now(),targets=this.store.admittedMailCacheTargets();
+      const candidates=targets.filter(row=>!row.has_detail&&row.detail_retry_at<=now);
+      if(!candidates.length)return;
+      const first=candidates.find(row=>!this.queues.has(row.account_id)&&!this.scheduled.has(row.account_id));
+      if(!first){await this.yieldWarm();continue;}
+      const batch=candidates.filter(row=>row.account_id===first.account_id).slice(0,5);
+      let account=this.store.account(first.account_id,first.user_id);if(!account)continue;
+      try {
+        const credentials=await this.serial(account.id,async()=>{account=this.currentAccount(account!);const credentials=await this.credentials(account);account=this.currentAccount(account);return credentials;},true);
+        if(this.queues.has(account.id)||this.scheduled.has(account.id))continue;
+        const snapshot=account;
+        await this.withClient(snapshot,credentials,async client=>{
+          for(const target of batch) {
+            // Each message owns only one short account operation. A waiting read,
+            // mutation or metadata sync runs before the next background message.
+            if(this.stopped||this.queues.has(snapshot.id)||this.scheduled.has(snapshot.id))break;
+            try {
+              await this.serial(snapshot.id,()=>this.boundedWarm(snapshot.id,client,async()=>{
+                const current=this.currentAccount(snapshot),row=this.store.message(target.id,snapshot.user_id);
+                if(current.credentials!==snapshot.credentials||current.mail_cache_epoch!==snapshot.mail_cache_epoch||current.imap_host!==snapshot.imap_host||current.imap_port!==snapshot.imap_port||current.imap_secure!==snapshot.imap_secure||current.username!==snapshot.username){this.interruptedWarmClients.add(client);this.cancelClient(client);throw new ApiError(409,'WARM_INTERRUPTED','邮箱配置已更新。');}
+                if(!row||!row.cache_priority||this.cachedDetail(row,false)||!this.store.canWarmMail(row))return;
+                this.assertReadable(client);
+                const lock=await client.getMailboxLock(row.folder,{readOnly:true});
+                try {
+                  this.assertReadable(client);
+                  if(!client.mailbox||client.mailbox.uidValidity?.toString()!==row.uid_validity)throw new ApiError(409,'STALE_MESSAGE','邮箱目录已更新。');
+                  const detail=await this.readDetail(client,row,false);
+                  if(!detail){this.store.db.prepare('UPDATE messages SET detail_retry_at=? WHERE id=?').run(Date.now()+86400_000,row.id);return;}
+                  this.persistDetail(snapshot,row,client,detail);
+                }finally{lock.release();}
+              }),true);
+            }catch {
+              if(!this.stopped&&!this.interruptedWarmClients.has(client))this.store.db.prepare('UPDATE messages SET detail_retry_at=MAX(detail_retry_at,?) WHERE id=? AND detail IS NULL').run(Date.now()+WARM_RETRY_DELAY,target.id);
+              if(this.timedOutClients.has(client)||client.usable===false)break;
+            }
+          }
+        });
+      }catch {
+        // Background failures do not change connection status or consume a new-mail baseline.
+        if(!this.stopped)this.store.db.prepare('UPDATE messages SET detail_retry_at=MAX(detail_retry_at,?) WHERE account_id=? AND cache_priority>0 AND detail IS NULL').run(Date.now()+WARM_RETRY_DELAY,first.account_id);
+      }
+      // Give work queued by events or HTTP requests a turn even on a fast LAN.
+      if(!this.stopped)await this.yieldWarm();
+    }
+  }
   private async notificationDetails(client:ImapFlow,message:FetchMessageObject):Promise<MailNotificationDetails> {
     const from=addresses(message.envelope?.from)[0]||{name:'',address:''};
     const details:MailNotificationDetails={subject:notificationText(message.envelope?.subject||'(无主题)',120)||'(无主题)',preview:'',from:{name:notificationText(from.name,80),address:notificationText(from.address,254)}};
@@ -346,10 +431,28 @@ export class MailService {
               const previous=this.store.db.prepare('SELECT f.uid_validity,COALESCE((SELECT MAX(m.uid) FROM messages m WHERE m.account_id=f.account_id AND m.folder=f.path AND m.uid_validity=?),0) AS max_uid FROM folders f WHERE f.account_id=? AND f.path=?').get(validity,id,path) as {uid_validity:string|null;max_uid:number}|undefined;
               const notifyNewMail=path.toUpperCase()==='INBOX'&&previous?.uid_validity===validity;
               const previousMaxUid=previous?.max_uid||0;
-              const fetched=mailbox.exists?await client.fetchAll(`${Math.max(1,mailbox.exists-this.config.syncMessageLimit+1)}:*`,{uid:true,envelope:true,flags:true,internalDate:true,bodyStructure:true,size:true}):[];
+              const metadata={uid:true,envelope:true,flags:true,internalDate:true,bodyStructure:true,size:true};
+              const fetched=mailbox.exists?await client.fetchAll(`${Math.max(1,mailbox.exists-this.config.syncMessageLimit+1)}:*`,metadata):[];
               if(fetched.length<Math.min(mailbox.exists,this.config.syncMessageLimit))throw new ApiError(409,'INCOMPLETE_FETCH','目录返回的邮件列表不完整，已保留原有缓存，下次同步将重试。');
+              const recentUids=new Set(fetched.map(message=>message.uid));
               const latest=notifyNewMail?fetched.reduce<FetchMessageObject|undefined>((latest,message)=>message.uid>previousMaxUid&&(!latest||message.uid>latest.uid)?message:latest,undefined):undefined;
               const folderNotification=latest?await this.notificationDetails(client,latest):undefined;
+              let preserveStarred=false;
+              try {
+                const flagged=mailbox.exists?await client.search({flagged:true},{uid:true}):[];
+                if(!Array.isArray(flagged))throw new Error('Missing flagged UID search result');
+                const extra=[...new Set(flagged.filter(uid=>Number.isSafeInteger(uid)&&uid>0&&!recentUids.has(uid)))];
+                for(let start=0;start<extra.length;start+=200) {
+                  const uids=extra.slice(start,start+200);
+                  const messages=await client.fetchAll(uids.join(','),metadata,{uid:true});
+                  if(messages.length!==uids.length)throw new ApiError(409,'INCOMPLETE_FETCH','星标邮件列表不完整，下次同步将重试。');
+                  fetched.push(...messages);
+                }
+              }catch(error) {
+                // A failed extra search must not erase older stars or prevent an
+                // otherwise complete recent INBOX from publishing its arrivals.
+                preserveStarred=true;failures.push(`${path.slice(0,100)} 星标：${safeMailError(error)}`);
+              }
               if(this.stopped)throw new ApiError(503,'SHUTDOWN','服务正在关闭。');
               if(this.timedOutClients.has(client))throw new ApiError(504,'MAIL_TIMEOUT','邮箱操作超时，请稍后重试。');
               const seen=new Set<string>();
@@ -369,10 +472,10 @@ export class MailService {
                 // before this poll; its arrival should still trigger the alert.
                 // Lower UIDs can re-enter the bounded cache after newer mail is
                 // deleted; only UIDs above the pre-fetch maximum are arrivals.
-                if(!old&&notifyNewMail&&message.uid>previousMaxUid)folderNewMail++;
+                if(!old&&notifyNewMail&&recentUids.has(message.uid)&&message.uid>previousMaxUid)folderNewMail++;
               }
-              const cached=this.store.db.prepare('SELECT id FROM messages WHERE account_id=? AND folder=?').all(id,path) as {id:string}[];
-              for(const item of cached)if(!seen.has(item.id))this.store.db.prepare('DELETE FROM messages WHERE id=?').run(item.id);
+              const cached=this.store.db.prepare('SELECT id,starred,uid_validity FROM messages WHERE account_id=? AND folder=?').all(id,path) as {id:string;starred:number;uid_validity:string}[];
+              for(const item of cached)if(!seen.has(item.id)&&!(preserveStarred&&item.starred&&item.uid_validity===validity))this.store.db.prepare('DELETE FROM messages WHERE id=?').run(item.id);
               this.store.db.prepare('UPDATE folders SET uid_validity=? WHERE account_id=? AND path=? AND uid_validity IS NOT ?').run(validity,id,path,validity);
               // Persist the arrival intent with its INBOX cache update. A shutdown
               // while syncing later folders must not consume the new UID silently.
@@ -414,60 +517,81 @@ export class MailService {
       }finally{lock.release();}
     });
   }
-  private cachedDetail(row:MessageRow):CachedDetail|undefined {
-    if(!row.detail||!row.detail_cached_at||row.detail_cached_at<Date.now()-this.config.mailCacheTtlDays*86400_000)return;
+  private cachedDetail(row:MessageRow,touch=true):CachedDetail|undefined {
+    if(!row.detail||!row.detail_cached_at||!row.starred&&!row.cache_priority&&row.detail_cached_at<Date.now()-this.config.mailCacheTtlDays*86400_000)return;
     const detail=JSON.parse(row.detail) as CachedDetail;
     if(detail.cacheVersion!==2)return;
-    this.store.db.prepare('UPDATE messages SET detail_cached_at=? WHERE id=?').run(Date.now(),row.id);
+    if(touch)this.store.db.prepare('UPDATE messages SET detail_cached_at=? WHERE id=?').run(Date.now(),row.id);
     return detail;
   }
   private async downloadPart(client:ImapFlow,uid:number,part:string|undefined,limit:number):Promise<Buffer> {
+    this.assertReadable(client);
     const download=await client.download(uid,part,{uid:true,maxBytes:limit+1,chunkSize:64*1024});
     if(!download.content)throw new ApiError(404,'NOT_FOUND','远端邮件内容不存在，请重新同步。');
+    if(this.stopped||this.timedOutClients.has(client)){download.content.destroy();this.assertReadable(client);}
+    const streams=this.bodyStreams.get(client)||new Set<Readable>();this.bodyStreams.set(client,streams);streams.add(download.content);
     const chunks:Buffer[]=[];let bytes=0;
-    for await(const chunk of download.content){const buffer=Buffer.from(chunk),remaining=limit+1-bytes;chunks.push(buffer.subarray(0,remaining));bytes+=Math.min(buffer.length,remaining);if(bytes>=limit+1){download.content.destroy();break;}}
-    return Buffer.concat(chunks,bytes);
+    try{
+      for await(const chunk of download.content){const buffer=Buffer.from(chunk),remaining=limit+1-bytes;chunks.push(buffer.subarray(0,remaining));bytes+=Math.min(buffer.length,remaining);if(bytes>=limit+1)break;}
+      this.assertReadable(client);
+      return Buffer.concat(chunks,bytes);
+    }finally{download.content.destroy();streams.delete(download.content);if(!streams.size)this.bodyStreams.delete(client);}
+  }
+  private async readDetail(client:ImapFlow,cached:MessageRow,allowFallback=true):Promise<CachedDetail|undefined> {
+    this.assertReadable(client);
+    const message=await client.fetchOne(cached.uid,{bodyStructure:true,envelope:true,size:true},{uid:true});
+    this.assertReadable(client);
+    if(!message)throw new ApiError(404,'NOT_FOUND','远端邮件已删除，请重新同步。');
+    let detail:CachedDetail;
+    if(message.bodyStructure) {
+      const parts=messageParts(message.bodyStructure);
+      const attachments=parts.attachments.slice(0,100).map((part,index):CachedAttachment=>({id:`${cached.id}-${index}`,filename:part.dispositionParameters?.filename||part.parameters?.name||`attachment-${index+1}`,contentType:part.type.toLowerCase(),size:part.size||0,contentId:part.id?.trim().replace(/^<|>$/g,'')||null,inline:part.disposition!=='attachment'&&(part.disposition==='inline'||!!part.id),part:part.part||'1',transferEncoding:part.encoding?.toLowerCase()}));
+      const text:string[]=[],html:string[]=[];let bodyTruncated=parts.bodies.length>16||parts.attachments.length>100;
+      let textBytes=0,htmlBytes=0;
+      for(const part of parts.bodies.slice(0,16)) {
+        const isHtml=part.type.toLowerCase()==='text/html',remaining=(isHtml?MAX_BODY_BYTES-htmlBytes:MAX_TEXT_BYTES-textBytes);
+        if(remaining<=0){bodyTruncated=true;continue;}
+        // ImapFlow decodes MIME transfer encodings and text charsets to UTF-8.
+        const body=await this.downloadPart(client,cached.uid,part.part||'1',remaining);
+        const bounded=body.subarray(0,remaining);if(body.length>remaining)bodyTruncated=true;
+        (isHtml?html:text).push(bounded.toString('utf8'));
+        if(isHtml)htmlBytes+=bounded.length;else textBytes+=bounded.length;
+      }
+      detail={cacheVersion:2,text:text.join('\n'),html:html.length?html.join('\n'):null,messageId:message.envelope?.messageId||null,attachments,bodyTruncated};
+      if(!detail.text&&detail.html){const parsed=await simpleParser(Buffer.from(`Content-Type: text/html; charset=utf-8\r\n\r\n${detail.html}`),{skipImageLinks:true,maxHtmlLengthToParse:MAX_BODY_BYTES});const text=Buffer.from(parsed.text||'');detail.text=text.subarray(0,MAX_TEXT_BYTES).toString('utf8');if(text.length>MAX_TEXT_BYTES)detail.bodyTruncated=true;}
+    } else {
+      if(!allowFallback)return;
+      // Some servers omit BODYSTRUCTURE. Use a bounded compatibility fallback,
+      // without persisting the MIME source or decoded attachment payloads.
+      if((message.size||0)>MAX_MESSAGE_BYTES)throw new ApiError(413,'MESSAGE_TOO_LARGE','服务器未提供邮件结构，且整封邮件超过 30 MiB，请在原邮箱客户端查看。');
+      const source=await this.downloadPart(client,cached.uid,undefined,MAX_MESSAGE_BYTES);
+      if(source.length>MAX_MESSAGE_BYTES)throw new ApiError(413,'MESSAGE_TOO_LARGE','邮件超过 30 MiB 在线查看上限。');
+      const parsed=await simpleParser(source,{skipHtmlToText:false,skipImageLinks:true,maxHtmlLengthToParse:MAX_BODY_BYTES});
+      const text=Buffer.from(parsed.text||''),html=parsed.html?Buffer.from(parsed.html):null;
+      detail={cacheVersion:2,text:text.subarray(0,MAX_TEXT_BYTES).toString('utf8'),html:html?.subarray(0,MAX_BODY_BYTES).toString('utf8')||null,messageId:parsed.messageId||null,bodyTruncated:text.length>MAX_TEXT_BYTES||(html?.length||0)>MAX_BODY_BYTES||parsed.attachments.length>100,attachments:parsed.attachments.slice(0,100).map((a,index)=>({id:`${cached.id}-${index}`,filename:a.filename||`attachment-${index+1}`,contentType:a.contentType,size:a.size,contentId:a.contentId?.trim().replace(/^<|>$/g,'')||null,inline:a.contentDisposition!=='attachment'&&(a.contentDisposition==='inline'||!!a.contentId),sourceIndex:index}))};
+    }
+    this.assertReadable(client);
+    return detail;
+  }
+  private persistDetail(account:AccountRow,cached:MessageRow,client:ImapFlow,detail:CachedDetail) {
+    this.assertReadable(client);
+    const current=this.currentAccount(account),fresh=this.store.message(cached.id,account.user_id);
+    if(current.mail_cache_epoch!==account.mail_cache_epoch||current.username!==account.username||current.imap_host!==account.imap_host||current.imap_port!==account.imap_port||current.imap_secure!==account.imap_secure||!fresh||fresh.uid_validity!==cached.uid_validity||fresh.uid!==cached.uid||fresh.folder!==cached.folder)throw new ApiError(409,'STALE_MESSAGE','邮箱或邮件已更新，请重新同步。');
+    const summary=JSON.stringify({...JSON.parse(fresh.summary),preview:detail.text.replace(/\s+/g,' ').slice(0,180),hasAttachments:detail.attachments.some(attachment=>!attachment.inline)});
+    const serialized=JSON.stringify(detail),detailCachedAt=Date.now();
+    this.store.db.prepare('UPDATE messages SET summary=?,source=NULL,detail=?,detail_cached_at=?,detail_size_bytes=?,detail_retry_at=0 WHERE id=?').run(summary,serialized,detailCachedAt,Buffer.byteLength(serialized),fresh.id);
+    this.store.pruneMailCache(false);
+    return{row:{...fresh,summary,detail:serialized,detail_cached_at:detailCachedAt},detail};
   }
   private async loadDetail(account:AccountRow,row:MessageRow):Promise<{row:MessageRow;detail:CachedDetail}> {
     const ready=this.cachedDetail(row);if(ready)return{row,detail:ready};
     return this.serial(account.id,async()=>{
+      account=this.currentAccount(account);
       const cached=this.store.message(row.id,account.user_id);if(!cached)throw new ApiError(404,'NOT_FOUND','邮件不存在。');
       const ready=this.cachedDetail(cached);if(ready)return{row:cached,detail:ready};
       return this.locked(account,cached,async client=>{
-        const message=await client.fetchOne(cached.uid,{bodyStructure:true,envelope:true,size:true},{uid:true});
-        if(!message)throw new ApiError(404,'NOT_FOUND','远端邮件已删除，请重新同步。');
-        let detail:CachedDetail;
-        if(message.bodyStructure) {
-          const parts=messageParts(message.bodyStructure);
-          const attachments=parts.attachments.slice(0,100).map((part,index):CachedAttachment=>({id:`${cached.id}-${index}`,filename:part.dispositionParameters?.filename||part.parameters?.name||`attachment-${index+1}`,contentType:part.type.toLowerCase(),size:part.size||0,contentId:part.id?.trim().replace(/^<|>$/g,'')||null,inline:part.disposition!=='attachment'&&(part.disposition==='inline'||!!part.id),part:part.part||'1',transferEncoding:part.encoding?.toLowerCase()}));
-          const text:string[]=[],html:string[]=[];let bodyTruncated=parts.bodies.length>16||parts.attachments.length>100;
-          let textBytes=0,htmlBytes=0;
-          for(const part of parts.bodies.slice(0,16)) {
-            const isHtml=part.type.toLowerCase()==='text/html',remaining=(isHtml?MAX_BODY_BYTES-htmlBytes:MAX_TEXT_BYTES-textBytes);
-            if(remaining<=0){bodyTruncated=true;continue;}
-            // ImapFlow decodes MIME transfer encodings and text charsets to UTF-8.
-            const body=await this.downloadPart(client,cached.uid,part.part||'1',remaining);
-            const bounded=body.subarray(0,remaining);if(body.length>remaining)bodyTruncated=true;
-            (isHtml?html:text).push(bounded.toString('utf8'));
-            if(isHtml)htmlBytes+=bounded.length;else textBytes+=bounded.length;
-          }
-          detail={cacheVersion:2,text:text.join('\n'),html:html.length?html.join('\n'):null,messageId:message.envelope?.messageId||null,attachments,bodyTruncated};
-          if(!detail.text&&detail.html){const parsed=await simpleParser(Buffer.from(`Content-Type: text/html; charset=utf-8\r\n\r\n${detail.html}`),{skipImageLinks:true,maxHtmlLengthToParse:MAX_BODY_BYTES});const text=Buffer.from(parsed.text||'');detail.text=text.subarray(0,MAX_TEXT_BYTES).toString('utf8');if(text.length>MAX_TEXT_BYTES)detail.bodyTruncated=true;}
-        } else {
-          // Some servers omit BODYSTRUCTURE. Use a bounded compatibility fallback,
-          // without persisting the MIME source or decoded attachment payloads.
-          if((message.size||0)>MAX_MESSAGE_BYTES)throw new ApiError(413,'MESSAGE_TOO_LARGE','服务器未提供邮件结构，且整封邮件超过 30 MiB，请在原邮箱客户端查看。');
-          const source=await this.downloadPart(client,cached.uid,undefined,MAX_MESSAGE_BYTES);
-          if(source.length>MAX_MESSAGE_BYTES)throw new ApiError(413,'MESSAGE_TOO_LARGE','邮件超过 30 MiB 在线查看上限。');
-          const parsed=await simpleParser(source,{skipHtmlToText:false,skipImageLinks:true,maxHtmlLengthToParse:MAX_BODY_BYTES});
-          const text=Buffer.from(parsed.text||''),html=parsed.html?Buffer.from(parsed.html):null;
-          detail={cacheVersion:2,text:text.subarray(0,MAX_TEXT_BYTES).toString('utf8'),html:html?.subarray(0,MAX_BODY_BYTES).toString('utf8')||null,messageId:parsed.messageId||null,bodyTruncated:text.length>MAX_TEXT_BYTES||(html?.length||0)>MAX_BODY_BYTES||parsed.attachments.length>100,attachments:parsed.attachments.slice(0,100).map((a,index)=>({id:`${cached.id}-${index}`,filename:a.filename||`attachment-${index+1}`,contentType:a.contentType,size:a.size,contentId:a.contentId?.trim().replace(/^<|>$/g,'')||null,inline:a.contentDisposition!=='attachment'&&(a.contentDisposition==='inline'||!!a.contentId),sourceIndex:index}))};
-        }
-        const summary=JSON.stringify({...JSON.parse(cached.summary),preview:detail.text.replace(/\s+/g,' ').slice(0,180),hasAttachments:detail.attachments.some(attachment=>!attachment.inline)});
-        const detailCachedAt=Date.now();
-        this.store.db.prepare('UPDATE messages SET summary=?,source=NULL,detail=?,detail_cached_at=? WHERE id=?').run(summary,JSON.stringify(detail),detailCachedAt,cached.id);
-        this.store.pruneMailCache();
-        return{row:{...cached,summary,detail:JSON.stringify(detail),detail_cached_at:detailCachedAt},detail};
+        const detail=await this.readDetail(client,cached);
+        return this.persistDetail(account,cached,client,detail!);
       });
     });
   }
@@ -506,17 +630,19 @@ export class MailService {
     }
   }
   async flags(account:AccountRow,row:MessageRow,flags:{unread?:boolean;starred?:boolean}) {
-    return this.serial(account.id,async()=>this.locked(account,row,async client=>{
+    const updated=await this.serial(account.id,async()=>this.locked(account,row,async client=>{
       const existing=await client.fetchOne(row.uid,{flags:true},{uid:true});if(!existing)throw new ApiError(404,'NOT_FOUND','远端邮件已删除。');
       if(flags.unread!==undefined)await (flags.unread?client.messageFlagsRemove(row.uid,['\\Seen'],{uid:true}):client.messageFlagsAdd(row.uid,['\\Seen'],{uid:true}));
       if(flags.starred!==undefined)await (flags.starred?client.messageFlagsAdd(row.uid,['\\Flagged'],{uid:true}):client.messageFlagsRemove(row.uid,['\\Flagged'],{uid:true}));
       const unread=flags.unread??!existing.flags?.has('\\Seen'),starred=flags.starred??!!existing.flags?.has('\\Flagged');
       const cached=this.store.message(row.id,account.user_id)||row;
-      this.store.db.prepare('UPDATE messages SET unread=?,starred=? WHERE id=?').run(Number(unread),Number(starred),row.id);
+      this.store.db.prepare('UPDATE messages SET unread=?,starred=?,detail_retry_at=CASE WHEN starred<>? THEN 0 ELSE detail_retry_at END WHERE id=?').run(Number(unread),Number(starred),Number(starred),row.id);
       if(row.folder.toUpperCase()==='INBOX')await this.refreshInboxUnread(account,client,row.folder,Number(unread)-cached.unread);
       this.emit(account.user_id,'sync',{accountId:account.id,status:'connected'});
       return summaryDto({...cached,unread:Number(unread),starred:Number(starred)});
     }));
+    if(flags.starred!==undefined){this.store.pruneMailCache();this.scheduleWarm();}
+    return updated;
   }
   async move(account:AccountRow,row:MessageRow,destination:string) {
     await this.serial(account.id,async()=>this.locked(account,row,async client=>{
@@ -563,6 +689,6 @@ export class MailService {
     });
   }
   async remove(account:AccountRow) {await this.serial(account.id,async()=>{this.store.db.prepare('DELETE FROM accounts WHERE id=? AND user_id=?').run(account.id,account.user_id);});}
-  stop() {this.stopped=true;for(const client of this.activeClients)client.close();for(const client of this.smtpClients)client.close();}
-  async close() {this.stop();await Promise.allSettled([...this.queues.values(),...this.scheduled.values()]);}
+  stop() {this.stopped=true;this.activeWarmOperation?.cancel();if(this.warmPause){clearTimeout(this.warmPause.timer);this.warmPause.resolve();this.warmPause=undefined;}for(const client of this.activeClients)this.cancelClient(client);for(const client of this.smtpClients)client.close();}
+  async close() {this.stop();await Promise.allSettled([...this.queues.values(),...this.scheduled.values(),...(this.warming?[this.warming]:[])]);}
 }

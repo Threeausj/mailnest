@@ -40,7 +40,7 @@ async function fixture(run:(project:Fixture)=>Promise<void>,stage?:StageNotifica
     current.beforeLock?.();
     client.mailbox={exists:current.exists??current.messages.length,uidValidity:current.validity,uidNext:Math.max(0,...current.messages.map(item=>item.uid))+1};
     return{release(){}};
-  },fetchAll:async(range:string)=>{if(current.error){if(current.disconnect)client.usable=false;throw current.error;}return current.messages.slice(Number(range.split(':')[0])-1);},status:async()=>{if(current.statusError)throw current.statusError;return{unseen:current.messages.filter(item=>!item.flags.has('\\Seen')).length};},download:async(uid:number,part:string,options:Fixture['downloads'][number]['options'])=>{
+  },search:async()=>current.messages.filter(item=>item.flags.has('\\Flagged')).map(item=>item.uid),fetchAll:async(range:string)=>{if(current.error){if(current.disconnect)client.usable=false;throw current.error;}return current.messages.slice(Number(range.split(':')[0])-1);},status:async()=>{if(current.statusError)throw current.statusError;return{unseen:current.messages.filter(item=>!item.flags.has('\\Seen')).length};},download:async(uid:number,part:string,options:Fixture['downloads'][number]['options'])=>{
     downloads.push({uid,part,options});const item=current.messages.find(message=>message.uid===uid)!;item.beforeDownload?.();await item.downloadWait;if(item.downloadError)throw item.downloadError;
     return{meta:{},content:item.stream||Readable.from(item.body||Buffer.from(''))};
   },fetchOne:async(uid:number,query:FetchQueryObject,options:{uid:boolean})=>{
@@ -256,6 +256,7 @@ test('a late body preview cannot commit after the enclosing IMAP operation has a
     mock.method(ImapFlow.prototype,'getMailboxLock',async function(this:ImapFlow,path:string){const lock=await synthetic.getMailboxLock(path);this.mailbox=synthetic.mailbox;return lock;}),
     mock.method(ImapFlow.prototype,'fetchAll',async(range:string)=>{mock.timers.tick(85_000);return synthetic.fetchAll(range,{uid:true});}),
     mock.method(ImapFlow.prototype,'download',async()=>{started=true;return pending;}),
+    mock.method(ImapFlow.prototype,'search',async()=>[]),
     mock.method(ImapFlow.prototype,'status',async(path:string)=>synthetic.status(path,{unseen:true})),
   ];
   (project.mail as unknown as {withClient:unknown}).withClient=(MailService.prototype as unknown as {withClient:unknown}).withClient;

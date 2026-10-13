@@ -11,6 +11,84 @@ import { loadConfig } from '../server/src/config.js';
 import type { MailNotificationDetails } from '../server/src/mail.js';
 
 const enabled = process.env.MAIL_TEST_ENABLED === 'true';
+test('TLS IMAP: prewarm merged recent bodies and old starred mail, then read without a connection', { skip: !enabled, timeout: 90_000 }, async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'mailnest-cache-wire-'));
+  const config = { ...loadConfig({
+    APP_URL: 'http://localhost:5173', DATA_DIR: dataDir,
+    ENCRYPTION_KEY: 'd'.repeat(64), ADMIN_EMAIL: 'cache@test.example', ADMIN_PASSWORD: 'MailnestCacheAdmin2026!',
+    ALLOW_PRIVATE_MAIL_HOSTS: 'true', SYNC_MESSAGE_LIMIT: '20', MAIL_CACHE_RECENT_COUNT: '3',
+  }), background: false };
+  const { app, mail, store } = await buildApp(config);
+  const notices: unknown[] = [];
+  Object.defineProperty(mail, 'notify', { value: async (...args: unknown[]) => { notices.push(args); } });
+  const host = process.env.MAIL_TEST_HOST || 'localhost';
+  const imapPort = Number(process.env.MAIL_TEST_IMAP_PORT || '33993');
+  const smtpPort = Number(process.env.MAIL_TEST_SMTP_PORT || '33465');
+  const suffix = process.env.MAIL_TEST_DOMAIN || 'mailnest.test';
+  const password = process.env.MAIL_TEST_PASSWORD || 'MailnestWirePassword2026';
+  const folder = `CacheWarm-${Date.now()}`;
+  const baseDate = Date.now() + 60_000;
+  try {
+    for (const [accountIndex, local] of ['alpha', 'beta'].entries()) {
+      const email = `${local}@${suffix}`;
+      const remote = new ImapFlow({ host, port: imapPort, secure: true, auth: { user: email, pass: password }, logger: false });
+      await remote.connect();
+      try {
+        await remote.mailboxCreate(folder);
+        for (let index = 0; index < (accountIndex === 0 ? 30 : 1); index++) {
+          const date = new Date(baseDate + (accountIndex === 0 ? index : 31) * 1000);
+          const raw = Buffer.from(`From: cache-sender@example.test\r\nTo: ${email}\r\nDate: ${date.toUTCString()}\r\nSubject: Cache warm ${local} ${index}\r\nMessage-ID: <cache-${local}-${index}-${baseDate}@example.test>\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n预缓存正文 ${local} ${index}`);
+          await remote.append(folder, raw, accountIndex === 0 && index === 0 ? ['\\Flagged'] : [], date);
+        }
+      } finally { await remote.logout(); }
+    }
+    const login = await app.inject({ method: 'POST', url: '/api/v1/auth/login', headers: { origin: config.appUrl }, payload: { email: config.adminEmail, password: config.adminPassword } });
+    assert.equal(login.statusCode, 200);
+    const headers = { cookie: login.cookies.map(item => `${item.name}=${item.value}`).join('; '), origin: config.appUrl };
+    for (const local of ['alpha', 'beta']) {
+      const email = `${local}@${suffix}`;
+      const response = await app.inject({ method: 'POST', url: '/api/v1/accounts', headers, payload: {
+        name: `缓存 ${local}`, email, username: email, password, color: '#2563eb', provider: 'imap',
+        imap: { host, port: imapPort, secure: true }, smtp: { host, port: smtpPort, secure: true },
+      } });
+      assert.equal(response.statusCode, 201, response.body);
+      await mail.waitForSync();
+    }
+    const accounts = store.accounts();
+    assert.ok(accounts.every(account => account.status === 'connected'));
+    const alpha = accounts.find(account => account.email === `alpha@${suffix}`)!;
+    assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM messages WHERE account_id=? AND folder=?').get(alpha.id, folder)!.n, 21, 'Old flagged UID remains outside the recent 20-message window');
+    const starred = store.db.prepare('SELECT id FROM messages WHERE account_id=? AND folder=? AND starred=1').get(alpha.id, folder) as { id: string };
+    assert.ok(starred);
+    const targets = store.db.prepare('SELECT id FROM messages WHERE starred=1 UNION SELECT id FROM (SELECT id FROM messages ORDER BY date DESC,id LIMIT 3)').all() as { id: string }[];
+    assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM messages WHERE detail IS NOT NULL').get()!.n, 0, 'No automatic prewarm when background is disabled');
+    mail.scheduleWarm(true); await mail.waitForWarm();
+    assert.equal(notices.length, 0, 'Initial synchronization and warming do not notify old mail');
+    for (const target of targets) {
+      const row = store.message(target.id, alpha.user_id)!;
+      assert.ok(row.detail, 'Every starred/recent target has a locally cached body');
+      assert.equal(row.source, null);
+    }
+    const remote = new ImapFlow({ host, port: imapPort, secure: true, auth: { user: alpha.email, pass: password }, logger: false });
+    await remote.connect();
+    try {
+      await remote.mailboxOpen(folder);
+      const row = store.message(starred.id, alpha.user_id)!;
+      const message = await remote.fetchOne(row.uid, { flags: true }, { uid: true });
+      assert.ok(message && message.flags?.has('\\Flagged'));
+      assert.ok(message && !message.flags?.has('\\Seen'), 'Warming uses BODY.PEEK and never marks read');
+    } finally { await remote.logout(); }
+    let attempts = 0;
+    Object.defineProperty(mail, 'withClient', { value: async () => { attempts++; throw new Error('Remote unavailable'); } });
+    for (const target of targets) {
+      const response = await app.inject({ url: `/api/v1/messages/${target.id}`, headers });
+      assert.equal(response.statusCode, 200, 'A warmed body is readable with IMAP offline');
+      assert.ok(response.json().message.text);
+    }
+    assert.equal(attempts, 0, 'Cache hits bypass remote connections entirely');
+    assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM attachments').get()!.n, 0);
+  } finally { await app.close(); await rm(dataDir, { recursive: true, force: true }); }
+});
 test('TLS IMAP/SMTP: multi-account send, sync, MIME attachment, flags, move, configuration edits, and disconnect', { skip: !enabled, timeout: 90_000 }, async () => {
   const dataDir = await mkdtemp(join(tmpdir(), 'mailnest-wire-'));
   const config = { ...loadConfig({

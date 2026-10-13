@@ -8,7 +8,7 @@ export interface Config {
   encryptionKey: string; adminEmail: string; adminPassword: string; adminName: string;
   googleClientId: string; googleClientSecret: string; googleRedirectUri: string;
   syncIntervalSeconds: number; syncMessageLimit: number;
-  mailCacheMaxBytes: number; mailCacheTtlDays: number;
+  mailCacheMaxBytes: number; mailCacheTtlDays: number; mailCacheRecentCount: number;
   vapidPublicKey: string; vapidPrivateKey: string; vapidSubject: string;
   trustProxy: boolean; allowPrivateMailHosts: boolean; background: boolean;
 }
@@ -33,7 +33,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     adminEmail: env.ADMIN_EMAIL.trim().toLowerCase(), adminPassword: env.ADMIN_PASSWORD, adminName: env.ADMIN_NAME || '管理员',
     googleClientId: env.GOOGLE_CLIENT_ID || '', googleClientSecret: env.GOOGLE_CLIENT_SECRET || '', googleRedirectUri,
     syncIntervalSeconds: integer(env.SYNC_INTERVAL_SECONDS, 60, 30, 86400), syncMessageLimit: integer(env.SYNC_MESSAGE_LIMIT, 200, 20, 1000),
-    mailCacheMaxBytes: integer(env.MAIL_CACHE_MAX_MIB, 64, 4, 1024) * 1024 * 1024, mailCacheTtlDays: integer(env.MAIL_CACHE_TTL_DAYS, 7, 1, 365),
+    mailCacheMaxBytes: integer(env.MAIL_CACHE_MAX_MIB, 256, 4, 1024) * 1024 * 1024, mailCacheTtlDays: integer(env.MAIL_CACHE_TTL_DAYS, 7, 1, 365), mailCacheRecentCount: integer(env.MAIL_CACHE_RECENT_COUNT, 100, 0, 1000),
     vapidPublicKey: env.VAPID_PUBLIC_KEY || '', vapidPrivateKey: env.VAPID_PRIVATE_KEY || '', vapidSubject: env.VAPID_SUBJECT || `mailto:${env.ADMIN_EMAIL}`,
     trustProxy: env.TRUST_PROXY === 'true', allowPrivateMailHosts: env.ALLOW_PRIVATE_MAIL_HOSTS === 'true', background: true,
   };

@@ -13,7 +13,7 @@ import {SecretBox} from '../src/security.js';
 
 async function fixture(run:(project:Awaited<ReturnType<typeof buildApp>>,accountId:string,cookie:string,config:ReturnType<typeof loadConfig>)=>Promise<void>) {
   const directory=await mkdtemp(join(tmpdir(),'mailnest-cache-'));
-  const config={...loadConfig({APP_URL:'http://localhost:5173',DATA_DIR:directory,ENCRYPTION_KEY:'d'.repeat(64),ADMIN_EMAIL:'test@example.com',ADMIN_PASSWORD:'MailnestCacheTest2026!',MAIL_CACHE_MAX_MIB:'4'}),background:false};
+  const config={...loadConfig({APP_URL:'http://localhost:5173',DATA_DIR:directory,ENCRYPTION_KEY:'d'.repeat(64),ADMIN_EMAIL:'test@example.com',ADMIN_PASSWORD:'MailnestCacheTest2026!',MAIL_CACHE_MAX_MIB:'4',MAIL_CACHE_RECENT_COUNT:'0'}),background:false};
   const project=await buildApp(config);
   try {
     const login=await project.app.inject({method:'POST',url:'/api/v1/auth/login',headers:{origin:config.appUrl},payload:{email:config.adminEmail,password:config.adminPassword}});
@@ -36,7 +36,7 @@ function seed(project:Awaited<ReturnType<typeof buildApp>>,accountId:string,fold
 test('QQ virtual parent without UIDVALIDITY is skipped while its real child synchronizes',async()=>fixture(async(project,id)=>{
   const paths=['INBOX','其他文件夹','其他文件夹/QQ邮件订阅'];
   const selected:string[]=[];
-  const client={usable:true,mailbox:{} as object,list:async()=>paths.map(path=>({path,name:path,flags:new Set()})),getMailboxLock:async(path:string)=>{selected.push(path);client.mailbox=path==='其他文件夹'?{exists:0}:{exists:path.includes('/')?1:0,uidValidity:0n,uidNext:2};return{release(){}};},fetchAll:async()=>[{uid:1,seq:1,envelope:{subject:'Child folder',date:'2026-01-01'},flags:new Set(),size:100}],status:async()=>({unseen:0})};
+  const client={usable:true,mailbox:{} as object,list:async()=>paths.map(path=>({path,name:path,flags:new Set()})),getMailboxLock:async(path:string)=>{selected.push(path);client.mailbox=path==='其他文件夹'?{exists:0}:{exists:path.includes('/')?1:0,uidValidity:0n,uidNext:2};return{release(){}};},search:async()=>[],fetchAll:async()=>[{uid:1,seq:1,envelope:{subject:'Child folder',date:'2026-01-01'},flags:new Set(),size:100}],status:async()=>({unseen:0})};
   mockClient(project,client);project.mail.schedule(id);await project.mail.waitForSync();
   assert.deepEqual(selected,paths);
   assert.equal(project.store.account(id)!.status,'connected');assert.equal(project.store.account(id)!.error,null);
@@ -51,7 +51,7 @@ test('QQ virtual parent without UIDVALIDITY is skipped while its real child sync
 test('missing UIDVALIDITY or incomplete FETCH preserves existing cached messages and continues other folders',async()=>fixture(async(project,id)=>{
   const virtual=seed(project,id,'其他文件夹'),incomplete=seed(project,id,'INBOX',99,'old');
   const paths=['INBOX','其他文件夹','其他文件夹/子目录'];
-  const client={usable:true,mailbox:{} as object,current:'',list:async()=>paths.map(path=>({path,name:path,flags:new Set()})),getMailboxLock:async(path:string)=>{client.current=path;client.mailbox=path==='其他文件夹'?{exists:0}:{exists:path==='INBOX'?2:1,uidValidity:1n,uidNext:3};return{release(){}};},fetchAll:async()=>client.current==='INBOX'?[]:[{uid:1,seq:1,envelope:{date:'2026-01-01'},flags:new Set(),size:100}],status:async()=>({unseen:0})};
+  const client={usable:true,mailbox:{} as object,current:'',list:async()=>paths.map(path=>({path,name:path,flags:new Set()})),getMailboxLock:async(path:string)=>{client.current=path;client.mailbox=path==='其他文件夹'?{exists:0}:{exists:path==='INBOX'?2:1,uidValidity:1n,uidNext:3};return{release(){}};},search:async()=>[],fetchAll:async()=>client.current==='INBOX'?[]:[{uid:1,seq:1,envelope:{date:'2026-01-01'},flags:new Set(),size:100}],status:async()=>({unseen:0})};
   mockClient(project,client);project.mail.schedule(id);await project.mail.waitForSync();
   assert.equal(project.store.account(id)!.status,'partial');assert.match(project.store.account(id)!.error!,/列表不完整/);
   assert.ok(project.store.db.prepare('SELECT id FROM messages WHERE id=?').get(virtual));assert.ok(project.store.db.prepare('SELECT id FROM messages WHERE id=?').get(incomplete));

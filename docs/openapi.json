@@ -835,7 +835,7 @@
             "$ref": "#/components/responses/ServerError"
           }
         },
-        "description": "省略 accountId 汇总当前用户所有邮箱。逻辑文件夹按账号映射。每个可选文件夹只缓存最近 SYNC_MESSAGE_LIMIT 封摘要（默认 200），每账号上限 100 个文件夹。搜索主题、发件人和仍缓存的已加载正文；total 针对本地缓存，不是完整远端历史。按日期倒序。"
+        "description": "省略 accountId 汇总当前用户所有邮箱。逻辑文件夹按账号映射。每个可选文件夹缓存最近 SYNC_MESSAGE_LIMIT 封摘要（默认 200），并额外同步窗口外星标，每账号上限 100 个文件夹。搜索主题、发件人和仍缓存的正文；total 针对本地缓存，不是完整远端历史。按日期倒序。"
       }
     },
     "/messages/{id}": {
@@ -895,7 +895,7 @@
             "$ref": "#/components/responses/Timeout"
           }
         },
-        "description": "按 MIME 结构按需读取正文，纯文本最多 512 KiB、HTML 最多 2 MiB，超限时 bodyTruncated=true。最多读取 16 个正文段、100 个附件元数据；服务商不提供结构时兼容读取完整 MIME，上限 30 MiB。原始 MIME 与附件二进制不持久保存；正文和附件元数据按最近访问缓存（全实例默认 64 MiB / 最后访问后 7 天，可配置 MAIL_CACHE_MAX_MIB / MAIL_CACHE_TTL_DAYS），淘汰后重新读取。读取本接口不会自动标记已读，客户端应显式 PATCH unread=false。"
+        "description": "优先读取服务器本地 SQLite 正文缓存，命中无需连接 IMAP。后台预缓存当前使用者所有星标及全部账号/目录合并的最新 100 封（MAIL_CACHE_RECENT_COUNT，0–1000，按列表日期；不同目录记录分别计数），不标记已读或生成通知。未命中时按 MIME 结构读取正文，纯文本最多 512 KiB、HTML 最多 2 MiB，超限时 bodyTruncated=true；最多 16 个正文段、100 个附件元数据。缺少结构时只在按需阅读中兼容读取完整 MIME，上限 30 MiB。原始 MIME 与附件二进制不持久保存。全实例正文预算默认 256 MiB（MAIL_CACHE_MAX_MIB，4–1024），优先保留星标、最新范围，其他正文按最近访问保留 7 天（MAIL_CACHE_TTL_DAYS，1–365）；目标不按 TTL 过期，预算不足仍可按需读取。读取不自动标已读，客户端显式 PATCH unread=false；网页先展示正文再后台标记。HTTP 响应仍 no-store。"
       },
       "patch": {
         "operationId": "updateMessage",
