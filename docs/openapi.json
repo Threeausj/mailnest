@@ -37,6 +37,9 @@
       "name": "API 令牌"
     },
     {
+      "name": "MCP"
+    },
+    {
       "name": "文档"
     }
   ],
@@ -1588,7 +1591,7 @@
         "tags": [
           "API 令牌"
         ],
-        "summary": "创建独立 API 令牌",
+        "summary": "创建 API 或 MCP 访问令牌",
         "parameters": [
           {
             "name": "Origin",
@@ -1640,7 +1643,7 @@
             }
           }
         },
-        "description": "令牌明文只显示一次，服务器保存摘要。当前 v1 令牌可读取 / 修改本用户邮箱邮件；没有细粒度权限，不能管理令牌、修改密码或发起 Google OAuth。"
+        "description": "令牌明文只显示一次。默认 api 令牌可读取和修改本用户邮箱邮件。mcp-read 令牌只用于 MCP 查询。"
       }
     },
     "/tokens/{id}": {
@@ -1938,6 +1941,169 @@
           }
         }
       }
+    },
+    "/mcp": {
+      "post": {
+        "tags": [
+          "MCP"
+        ],
+        "security": [
+          {
+            "mcpBearer": []
+          }
+        ],
+        "operationId": "mcpRequest",
+        "summary": "处理 MCP Streamable HTTP 请求",
+        "description": "支持握手、工具发现与只读工具调用。每次请求携带 MCP 令牌。工具定义、连接和分页说明见 docs/mcp.md。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "jsonrpc",
+                  "method"
+                ],
+                "properties": {
+                  "jsonrpc": {
+                    "type": "string",
+                    "enum": [
+                      "2.0"
+                    ]
+                  },
+                  "id": {
+                    "oneOf": [
+                      {
+                        "type": "integer"
+                      },
+                      {
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  "method": {
+                    "type": "string"
+                  },
+                  "params": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON-RPC 响应或 SSE 消息",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "通知已接收"
+          },
+          "400": {
+            "description": "JSON-RPC 消息或协议版本无效"
+          },
+          "401": {
+            "description": "缺少有效的 MCP 令牌",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host 或 Origin 不在服务配置允许的范围内"
+          },
+          "406": {
+            "description": "Accept 不兼容"
+          },
+          "413": {
+            "description": "请求超过 64 KiB"
+          },
+          "415": {
+            "description": "需要 application/json 请求"
+          },
+          "500": {
+            "description": "服务器错误"
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "MCP"
+        ],
+        "security": [
+          {
+            "mcpBearer": []
+          }
+        ],
+        "operationId": "mcpStandaloneStream",
+        "summary": "无会话 MCP 端点返回 405",
+        "responses": {
+          "401": {
+            "description": "缺少有效的 MCP 令牌",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host 或 Origin 不在服务配置允许的范围内"
+          },
+          "405": {
+            "description": "服务按请求处理，此方法不可用"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "MCP"
+        ],
+        "security": [
+          {
+            "mcpBearer": []
+          }
+        ],
+        "operationId": "mcpTerminateSession",
+        "summary": "无会话 MCP 端点返回 405",
+        "responses": {
+          "401": {
+            "description": "缺少有效的 MCP 令牌",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host 或 Origin 不在服务配置允许的范围内"
+          },
+          "405": {
+            "description": "服务按请求处理，此方法不可用"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1953,6 +2119,11 @@
         "scheme": "bearer",
         "bearerFormat": "opaque API token",
         "description": "在已登录会话中 POST /tokens 创建；非 Google Access Token，不能访问会话专属操作。"
+      },
+      "mcpBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "通过 POST /tokens 创建 scope 为 mcp-read 的独立令牌。"
       }
     },
     "schemas": {
@@ -2835,13 +3006,22 @@
             "type": "string",
             "format": "date-time",
             "nullable": true
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "api",
+              "mcp-read"
+            ],
+            "description": "api 使用常规 API。mcp-read 使用 MCP 只读端点。"
           }
         },
         "required": [
           "id",
           "name",
           "createdAt",
-          "lastUsedAt"
+          "lastUsedAt",
+          "scope"
         ]
       },
       "TokensResponse": {
@@ -2866,6 +3046,15 @@
             "minLength": 1,
             "maxLength": 80,
             "description": "令牌名称，去除首尾空白；每用户最多 20 个令牌。"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "api",
+              "mcp-read"
+            ],
+            "description": "api 使用常规 API。mcp-read 使用 MCP 只读端点。",
+            "default": "api"
           }
         },
         "required": [

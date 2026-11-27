@@ -2,16 +2,18 @@ import Fastify, { type FastifyRequest, type FastifyReply } from 'fastify';
 import cookie from '@fastify/cookie';
 import fastifyStatic from '@fastify/static';
 import { z, ZodError } from 'zod';
-import { randomUUID, createHash, randomBytes } from 'node:crypto';
+import { randomUUID, createHash, createHmac, randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import type { ServerResponse } from 'node:http';
 import webPush from 'web-push';
 import { type Config, loadConfig, repoRoot, frontendBuilt } from './config.js';
-import { Store, type UserRow, type AccountRow, type MessageRow, accountDto, summaryDto, userDto } from './db.js';
+import { Store, type UserRow, accountDto, summaryDto, userDto } from './db.js';
 import { ApiError, hashPassword, verifyPassword, hashToken, randomToken, safeMailError } from './security.js';
-import { MailService, findFolder, googleToken, googleIdentity, type MailNotificationDetails } from './mail.js';
+import { MailService, googleToken, googleIdentity, type MailNotificationDetails } from './mail.js';
+import { listMessages, mailListQuery, ownedAccount, ownedMessage } from './mail-query.js';
+import { createMailMcp, mcpPath } from './mcp.js';
 import { PushDeliveryQueue, pushDeliveryOptions } from './push.js';
 
 interface Auth {user:UserRow;kind:'session'|'token';sessionId?:string;expiresAt?:number}
@@ -77,34 +79,45 @@ export async function buildApp(config:Config=loadConfig()) {
     if(config.vapidPublicKey&&config.vapidPrivateKey)await pushQueue.enqueue(notification(userId,accountId,count,notificationId,details));
   }
   const mail=new MailService(store,config,emit,notify,stageNotification);
+  const mcp = createMailMcp(store, mail, config.appUrl);
   const loginAttempts=new Map<string,{count:number;until:number}>();
   const pushTestAttempts=new Map<string,number>();
   const cookieOptions={httpOnly:true,secure:config.appUrl.startsWith('https:'),sameSite:'lax' as const,path:'/api',maxAge:7*24*60*60};
   const prefix='/api/v1';
-  function account(request:FastifyRequest,id:string):AccountRow {const row=store.account(id,request.auth!.user.id);if(!row)throw new ApiError(404,'NOT_FOUND','邮箱不存在。');return row;}
-  function message(request:FastifyRequest,id:string):MessageRow {const row=store.message(id,request.auth!.user.id);if(!row)throw new ApiError(404,'NOT_FOUND','邮件不存在。');return row;}
+  // Keyed digests also keep MCP tokens outside the legacy API token lookup on rollback.
+  const tokenHash = (token: string, scope: 'mcp-read' | 'api') => scope === 'mcp-read'
+    ? createHmac('sha256', Buffer.from(config.encryptionKey, 'hex')).update(`mailnest-mcp-token:${token}`).digest('hex')
+    : hashToken(token);
+  function account(request: FastifyRequest, id: string) { return ownedAccount(store, request.auth!.user.id, id); }
+  function message(request: FastifyRequest, id: string) { return ownedMessage(store, request.auth!.user.id, id); }
   function sessionOnly(request:FastifyRequest) {if(request.auth?.kind!=='session')throw new ApiError(403,'SESSION_REQUIRED','此操作需要浏览器会话登录。');}
   function csrf(request:FastifyRequest) {if(request.headers.origin!==config.appUrl)throw new ApiError(403,'INVALID_ORIGIN','请求来源无效，请从配置的站点地址登录。');}
   app.addHook('onRequest',async(request,reply)=>{
     reply.header('X-Content-Type-Options','nosniff').header('Referrer-Policy','same-origin').header('X-Frame-Options','DENY');
     if(config.appUrl.startsWith('https:'))reply.header('Strict-Transport-Security','max-age=31536000');
     const path=request.url.split('?')[0];
-    if(!path.startsWith('/api/'))return;
+    const isMcp = request.routeOptions.url === mcpPath;
+    if (!isMcp && !path.startsWith('/api/')) return;
     reply.header('Cache-Control','no-store');
     if(path===`${prefix}/health`||path===`${prefix}/auth/login`){if(path.endsWith('/auth/login')&&request.method==='POST')csrf(request);return;}
+    if (isMcp && request.headers.origin !== undefined) csrf(request);
+    const scope = isMcp ? 'mcp-read' : 'api';
     const authorization=request.headers.authorization;
     if(authorization) {
       const bearer=/^Bearer (\S+)$/.exec(authorization);
-      const token=bearer?store.db.prepare('SELECT id,user_id FROM api_tokens WHERE token_hash=?').get(hashToken(bearer[1])) as {id:string;user_id:string}|undefined:undefined;
+      const token=bearer?store.db.prepare('SELECT id,user_id,scope FROM api_tokens WHERE token_hash=?').get(tokenHash(bearer[1], scope)) as {id:string;user_id:string;scope:string}|undefined:undefined;
       const user=token?store.user(token.user_id):undefined;
-      if(user&&token){request.auth={user,kind:'token'};store.db.prepare('UPDATE api_tokens SET last_used_at=? WHERE id=?').run(new Date().toISOString(),token.id);}
-    }else {
+      if (user && token && token.scope === scope) {request.auth={user,kind:'token'};store.db.prepare('UPDATE api_tokens SET last_used_at=? WHERE id=?').run(new Date().toISOString(),token.id);}
+    } else if (!isMcp) {
       const session=request.cookies[cookieName];
       const row=session?store.db.prepare('SELECT user_id,expires_at FROM sessions WHERE id=? AND expires_at>?').get(hashToken(session),Date.now()) as {user_id:string;expires_at:number}|undefined:undefined;
       const user=row?store.user(row.user_id):undefined;
       if(user&&row)request.auth={user,kind:'session',sessionId:hashToken(session!),expiresAt:row.expires_at};
     }
-    if(!request.auth)throw new ApiError(401,'UNAUTHENTICATED','请先登录。');
+    if (!request.auth) {
+      if (isMcp) reply.header('WWW-Authenticate', 'Bearer realm="MailNest MCP"');
+      throw new ApiError(401, 'UNAUTHENTICATED', isMcp ? '请提供有效的 MCP 只读令牌。' : '请先登录。');
+    }
     if(!['GET','HEAD','OPTIONS'].includes(request.method)&&request.auth.kind==='session')csrf(request);
   });
   app.setErrorHandler((error,request,reply)=>{
@@ -116,6 +129,11 @@ export async function buildApp(config:Config=loadConfig()) {
     request.log.error({category:fastifyError.code||'INTERNAL_ERROR'},'Request failed');
     return reply.code(500).send({error:{code:'INTERNAL_ERROR',message:'服务暂时无法完成此操作，请稍后重试。'}});
   });
+  app.post('/api/v1/mcp', { bodyLimit: 64 * 1024 }, mcp.handle);
+  app.get('/api/v1/mcp', { exposeHeadRoute: false }, mcp.handle);
+  app.delete('/api/v1/mcp', mcp.handle);
+  app.addHook('preClose', async () => { await mcp.close(); });
+
   app.get(`${prefix}/health`,async()=>({status:'ok'}));
   app.post(`${prefix}/auth/login`,async(request,reply)=>{
     const input=z.object({email:z.email().max(254),password:z.string().max(1024)}).strict().parse(request.body);
@@ -175,26 +193,8 @@ export async function buildApp(config:Config=loadConfig()) {
     const input=z.object({accountId:z.string().max(100).optional()}).strict().parse(request.body||{});
     const rows=input.accountId?[account(request,input.accountId)]:store.accounts(request.auth!.user.id);for(const row of rows)mail.schedule(row.id);return{ok:true};
   });
-  app.get(`${prefix}/messages`,async request=>{
-    const query=z.object({accountId:z.string().max(100).optional(),folder:z.string().min(1).max(200).default('INBOX'),filter:z.enum(['all','unread','starred']).default('all'),q:z.string().max(200).default(''),page:z.coerce.number().int().min(1).max(100_000).default(1),pageSize:z.coerce.number().int().min(1).max(100).default(30)}).strict().parse(request.query);
-    const accounts=query.accountId?[account(request,query.accountId)]:store.accounts(request.auth!.user.id);
-    const conditions:string[]=[];const values:(string|number)[]=[];
-    for(const row of accounts){
-      const folders=mail.folderRows(row.id);
-      // A specific mailbox supplies actual server paths, including paths that
-      // happen to match another folder's logical alias (for example "drafts").
-      const exact=query.accountId?folders.find(folder=>folder.path===query.folder):undefined;
-      const folder=exact?(exact.selectable===0?undefined:exact.path):findFolder(folders,query.folder);
-      if(folder){conditions.push('(m.account_id=? AND m.folder=?)');values.push(row.id,folder);}
-    }
-    if(!conditions.length)return{messages:[],total:0,page:query.page,pageSize:query.pageSize};
-    let where=`(${conditions.join(' OR ')}) AND a.user_id=?`;values.push(request.auth!.user.id);
-    if(query.filter==='unread')where+=' AND m.unread=1';if(query.filter==='starred')where+=' AND m.starred=1';
-    if(query.q){where+=" AND (json_extract(m.summary,'$.subject') LIKE ? ESCAPE '\\' OR json_extract(m.summary,'$.from.address') LIKE ? ESCAPE '\\' OR json_extract(m.summary,'$.from.name') LIKE ? ESCAPE '\\' OR json_extract(m.detail,'$.text') LIKE ? ESCAPE '\\')";const q=`%${query.q.replace(/[\\%_]/g,'\\$&')}%`;values.push(q,q,q,q);}
-    const count=store.db.prepare(`SELECT COUNT(*) AS total FROM messages m JOIN accounts a ON a.id=m.account_id WHERE ${where}`).get(...values) as {total:number};
-    const rows=store.db.prepare(`SELECT m.id,m.account_id,m.folder,m.summary,m.unread,m.starred FROM messages m JOIN accounts a ON a.id=m.account_id WHERE ${where} ORDER BY m.date DESC,m.id LIMIT ? OFFSET ?`).all(...values,query.pageSize,(query.page-1)*query.pageSize) as unknown as MessageRow[];
-    return{messages:rows.map(summaryDto),total:count.total,page:query.page,pageSize:query.pageSize};
-  });
+  app.get(`${prefix}/messages`, async request =>
+    listMessages(store, mail, request.auth!.user.id, mailListQuery.parse(request.query)));
   app.get(`${prefix}/messages/:id`,async request=>{const row=message(request,(request.params as {id:string}).id);try{return{message:await mail.detail(account(request,row.account_id),row)};}catch(error){if(error instanceof ApiError)throw error;throw new ApiError(400,'MAIL_OPERATION_FAILED',safeMailError(error));}});
   app.patch(`${prefix}/messages/:id`,async request=>{
     const input=z.object({unread:z.boolean().optional(),starred:z.boolean().optional()}).strict().refine(v=>v.unread!==undefined||v.starred!==undefined).parse(request.body);const row=message(request,(request.params as {id:string}).id);
@@ -277,8 +277,27 @@ export async function buildApp(config:Config=loadConfig()) {
     }
     return{ok:true,accepted:true};
   });
-  app.get(`${prefix}/tokens`,async request=>{sessionOnly(request);return{tokens:store.db.prepare('SELECT id,name,created_at AS createdAt,last_used_at AS lastUsedAt FROM api_tokens WHERE user_id=? ORDER BY created_at DESC').all(request.auth!.user.id)};});
-  app.post(`${prefix}/tokens`,async(request,reply)=>{sessionOnly(request);const input=z.object({name:z.string().trim().min(1).max(80)}).strict().parse(request.body);const count=store.db.prepare('SELECT COUNT(*) AS n FROM api_tokens WHERE user_id=?').get(request.auth!.user.id) as {n:number};if(count.n>=20)throw new ApiError(400,'TOKEN_LIMIT','最多可创建 20 个 API 令牌。');const token=`mn_${randomToken()}`,id=randomUUID();store.db.prepare('INSERT INTO api_tokens(id,user_id,name,token_hash,created_at) VALUES(?,?,?,?,?)').run(id,request.auth!.user.id,input.name,hashToken(token),new Date().toISOString());return reply.code(201).send({token,id});});
+  app.get(`${prefix}/tokens`, async request => {
+    sessionOnly(request);
+    return { tokens: store.db.prepare(
+      'SELECT id,name,scope,created_at AS createdAt,last_used_at AS lastUsedAt FROM api_tokens WHERE user_id=? ORDER BY created_at DESC',
+    ).all(request.auth!.user.id) };
+  });
+  app.post(`${prefix}/tokens`, async (request, reply) => {
+    sessionOnly(request);
+    const input = z.object({
+      name: z.string().trim().min(1).max(80),
+      scope: z.enum(['api', 'mcp-read']).default('api'),
+    }).strict().parse(request.body);
+    const userId = request.auth!.user.id;
+    const count = store.db.prepare('SELECT COUNT(*) AS n FROM api_tokens WHERE user_id=?').get(userId) as { n: number };
+    if (count.n >= 20) throw new ApiError(400, 'TOKEN_LIMIT', '最多可创建 20 个访问令牌。');
+    const token = `${input.scope === 'mcp-read' ? 'mn_mcp' : 'mn'}_${randomToken()}`;
+    const id = randomUUID();
+    store.db.prepare('INSERT INTO api_tokens(id,user_id,name,token_hash,created_at,scope) VALUES(?,?,?,?,?,?)')
+      .run(id, userId, input.name, tokenHash(token, input.scope), new Date().toISOString(), input.scope);
+    return reply.code(201).send({ token, id });
+  });
   app.delete(`${prefix}/tokens/:id`,async request=>{sessionOnly(request);store.db.prepare('DELETE FROM api_tokens WHERE id=? AND user_id=?').run((request.params as {id:string}).id,request.auth!.user.id);return{ok:true};});
   app.get(`${prefix}/openapi.json`,async()=>JSON.parse(await readFile(resolve(repoRoot,'docs/openapi.json'),'utf8')));
   const require=createRequire(import.meta.url);const swaggerAssets=resolve(dirname(require.resolve('@fastify/swagger-ui/package.json')),'static');

@@ -110,6 +110,23 @@ test('real login, account setup, API token access/revocation, documentation and 
   await page.getByRole('button',{name:`撤销令牌 ${tokenName}`}).click();
   await expect(page.getByRole('button',{name:`撤销令牌 ${tokenName}`})).toHaveCount(0);
   expect((await page.request.get('/api/v1/accounts',{headers:{Authorization:`Bearer ${token}`}})).status()).toBe(401);
+  await expect(page.getByText(`${new URL(page.url()).origin}/api/v1/mcp`, {exact:true})).toBeVisible();
+  await page.getByLabel('令牌类型').selectOption('mcp-read');
+  const mcpName = `${tokenName}-MCP`;
+  await page.getByLabel('令牌名称').fill(mcpName);
+  await page.getByRole('button',{name:'创建令牌'}).click();
+  await expect(page.locator('.new-token code')).toHaveText(/^mn_mcp_/);
+  const mcpToken = await page.locator('.new-token code').textContent();
+  const mcp = await page.request.post('/api/v1/mcp', {
+    headers: { Authorization: `Bearer ${mcpToken}`, Accept: 'application/json, text/event-stream' },
+    data: { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+  });
+  expect(mcp.ok()).toBeTruthy();
+  expect(await mcp.text()).toContain('search_messages');
+  await noHorizontalOverflow(page);
+  page.once('dialog', event => event.accept());
+  await page.getByRole('button',{name:`撤销令牌 ${mcpName}`}).click();
+  await expect(page.getByRole('button',{name:`撤销令牌 ${mcpName}`})).toHaveCount(0);
   await page.getByRole('tab',{name:'应用与提醒'}).click();
   await expect(page.getByText('iPhone / iPad', {exact:true})).toBeVisible();
   await page.getByRole('button',{name:'退出登录'}).click();

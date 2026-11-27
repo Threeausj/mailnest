@@ -8,6 +8,8 @@
 
 第三方工具使用 `Authorization: Bearer <MailNest API token>`；在设置中或已登录会话下 `POST /tokens` 创建，明文只返回一次，可随时撤销。API 令牌是 MailNest 的独立凭据，不是 Google Access Token。目前令牌可操作所属用户全部邮箱与邮件，没有细粒度权限；不能管理令牌、修改登录密码或进行 Google OAuth。
 
+MCP 客户端通过 `/api/v1/mcp` 连接，使用单独的只读令牌。创建时指定 `scope: "mcp-read"`，常规 API 令牌的默认范围为 `api`。[MCP 接入说明](mcp.md)
+
 所有资源以当前用户为边界，访问其他用户的 ID 与访问不存在的 ID 均失败。错误统一为：
 
 ```json
@@ -79,7 +81,9 @@ curl -H 'Authorization: Bearer 替换为API令牌' \
 | PATCH | `/accounts/order` | 用户 | 原子保存本人全部邮箱的显示顺序 |
 | POST / DELETE | `/push/subscriptions` | 用户 | 添加 / 撤销 Web Push 订阅 |
 | POST | `/push/test` | 用户 | 向本人指定的已登记设备发送一次测试通知 |
-| GET / POST | `/tokens` | 会话 | 查看 / 创建 API 令牌 |
+| POST | `/mcp` | MCP 令牌 | Streamable HTTP，查询邮箱和读取邮件 |
+| GET / DELETE | `/mcp` | MCP 令牌 | 无会话端点，返回 405 |
+| GET / POST | `/tokens` | 会话 | 查看 / 创建访问令牌 |
 | DELETE | `/tokens/{id}` | 会话 | 撤销 API 令牌 |
 | GET | `/openapi.json` | 用户 | OpenAPI 3.0.3 定义 |
 | GET | `/docs` | 用户 | 交互式接口文档 |

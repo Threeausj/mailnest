@@ -90,7 +90,7 @@ test('push test retains authentication, origin, provider URL validation and indi
   const unknown=await sendTest(project,cookie,endpoint('unknown')),notOwned=await sendTest(project,cookie,foreign);
   assert.equal(unknown.statusCode,404);assert.deepEqual(notOwned.json(),unknown.json());assert.equal(notOwned.statusCode,404);assert.equal(unknown.json().error.code,'PUSH_SUBSCRIPTION_NOT_FOUND');
   assert.equal(delivery.calls.length,0);assert.ok(project.store.db.prepare('SELECT endpoint FROM push_subscriptions WHERE endpoint=?').get(foreign));
-  const token='synthetic-notification-token';project.store.db.prepare('INSERT INTO api_tokens VALUES(?,?,?,?,?,?)').run(randomUUID(),userId,'Synthetic API client',hashToken(token),'2026-01-01',null);
+  const token='synthetic-notification-token';project.store.db.prepare('INSERT INTO api_tokens(id,user_id,name,token_hash,created_at,last_used_at) VALUES(?,?,?,?,?,?)').run(randomUUID(),userId,'Synthetic API client',hashToken(token),'2026-01-01',null);
   const accepted=await project.app.inject({method:'POST',url:'/api/v1/push/test',headers:{authorization:`Bearer ${token}`},payload:{endpoint:owned}});assert.equal(accepted.statusCode,200);assert.equal(payload(delivery.calls[0]).unreadCount,0);
 }));
 

@@ -277,3 +277,15 @@
   .mobile-bottom-nav>button{position:relative;display:flex;flex-direction:column;align-items:center;gap:2px;color:#a4b190;font-size:10px;min-width:44px;min-height:44px;justify-content:center}
   .mobile-bottom-nav>button.mobile-compose{width:40px;height:40px;min-width:40px;min-height:40px;border-radius:10px;background:#193b3c;color:#fffef6;box-shadow:0 2px 7px #193b3c16;margin:0 5px}
 }
+
+.mcp-connect { margin-bottom: 16px; font-size: 12px; }
+.mcp-connect > div { display: flex; align-items: center; gap: 8px; }
+.mcp-connect code { min-width: 0; overflow-wrap: anywhere; }
+.mcp-connect p { margin-top: 4px; }
+.token-form-scoped { flex-wrap: wrap; align-items: flex-end; }
+.token-form-scoped label { min-width: 0; flex: 1 1 135px; }
+.token-form-scoped > .button { align-self: flex-end !important; }
+@media (max-width: 540px) {
+  .token-form-scoped label { flex-basis: 100%; }
+  .token-form-scoped select { min-height: 44px; }
+}

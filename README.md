@@ -110,6 +110,8 @@ Android / 桌面可使用浏览器安装菜单；iPhone / iPad 可在 Safari 的
 
 登录后访问 `/api/v1/docs` 查看交互文档，`/api/v1/openapi.json` 获取 OpenAPI 3.0.3。使用说明、curl 示例与维护规则见 [API 文档](docs/api.md)。API 文档也需要鉴权。
 
+在「设置 → 安全与 API」可创建 MCP 只读令牌，并复制 Streamable HTTP 连接地址。MCP 提供邮箱和文件夹列表、邮件搜索及正文读取。[MCP 接入说明](docs/mcp.md)
+
 ```sh
 npm run typecheck
 npm test

@@ -21,7 +21,8 @@ export interface Message extends MessageSummary {
   attachments: { id: string; filename: string; contentType: string; size: number; contentId?: string | null; inline?: boolean }[];
 }
 export interface Config { googleConfigured: boolean; pushPublicKey: string | null; pollingInterval: number }
-export interface Token { id: string; name: string; createdAt: string; lastUsedAt: string | null }
+export type TokenScope = 'api' | 'mcp-read';
+export interface Token { id: string; name: string; scope: TokenScope; createdAt: string; lastUsedAt: string | null }
 export interface DraftAttachment { filename: string; contentType: string; content: string; size: number }
 export interface InstallPrompt extends Event {
   prompt(): Promise<void>;

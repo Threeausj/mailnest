@@ -47,9 +47,10 @@ MailEvent.notification is optional for compatibility and describes the latest ne
 
 SSE event 'change' is {accountId:string,action:'message-updated'|'message-moved'|'accounts-updated'|'message-sent',messageId?:string,message?:MessageSummary,unreadCount:number}. Successful flags updates include message and messageId; move includes messageId; ordinary account create/update/remove/order and successful send broadcast their corresponding action only to the same owner's signed-in streams. Google OAuth connection refreshes other devices through its scheduled sync event. Clients refresh loaded message ranges/accounts; merge changed summary metadata into an open message without reloading its HTML iframe, and return to the list if that message was moved. Mutations update unread total from a successful operation's current-row delta, then reconcile with remote complete INBOX STATUS; STATUS failure does not roll back a successful remote change, schedule a retry instead. No mutation event generates a new-mail system Push. New-mail delivery stages all currently registered owner subscriptions independently, with one shared batch ID and per-device dedupe; subscription authorization is per device, login alone does not grant notification permission. Frontend uses infinite scroll over the existing page/pageSize API (30 per batch), refreshes all loaded pages atomically and deduplicates IDs while retaining scroll; directory/filter/search changes restart loading.
 
-- GET /tokens -> {tokens:{id:string,name:string,createdAt:string,lastUsedAt:string|null}[]}
-- POST /tokens {name:string} -> {token:string,id:string}; plaintext only once
+- GET /tokens -> {tokens:{id:string,name:string,scope:'api'|'mcp-read',createdAt:string,lastUsedAt:string|null}[]}
+- POST /tokens {name:string,scope?:'api'|'mcp-read'} -> {token:string,id:string} (201). Scope defaults to api. The response shows the token once. Both scopes share the 20-token limit.
 - DELETE /tokens/:id -> {ok:true}
+- POST /mcp -> MCP Streamable HTTP with a dedicated mcp-read Bearer token. Uses the same owner-scoped mail queries and body cache. Supports list_accounts, list_folders, search_messages and read_message. GET and DELETE return 405 with valid MCP credentials. See [MCP connection and tool guide](../docs/mcp.md).
 - GET /openapi.json -> OpenAPI 3.0.3
 - GET /docs -> interactive API docs, authenticated
 

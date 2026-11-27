@@ -53,6 +53,10 @@ export class Store {
     const accountColumns=this.db.prepare('PRAGMA table_info(accounts)').all() as {name:string}[];
     if(!accountColumns.some(column=>column.name==='mail_cache_epoch'))this.db.exec("ALTER TABLE accounts ADD COLUMN mail_cache_epoch TEXT NOT NULL DEFAULT ''");
     if(!accountColumns.some(column=>column.name==='sort_order'))this.db.exec('ALTER TABLE accounts ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0');
+    const tokenColumns = this.db.prepare('PRAGMA table_info(api_tokens)').all() as { name: string }[];
+    if (!tokenColumns.some(column => column.name === 'scope')) {
+      this.db.exec("ALTER TABLE api_tokens ADD COLUMN scope TEXT NOT NULL DEFAULT 'api' CHECK(scope IN ('api','mcp-read'))");
+    }
     // Old versions stored both complete MIME messages and decoded attachment bytes.
     // The remote mailbox remains the source of truth; keep only bounded body caches.
     this.db.exec("UPDATE messages SET source=NULL WHERE source IS NOT NULL; DELETE FROM attachments; UPDATE messages SET detail=NULL,detail_cached_at=NULL,detail_size_bytes=0,detail_retry_at=0 WHERE detail IS NOT NULL AND (json_extract(detail,'$.cacheVersion') IS NOT 2)");
